@@ -11,6 +11,23 @@ export const generateSessionId = () => {
 }
 
 /**
+ * Get or create a stable user id for CRM.
+ * Stored in localStorage so it persists across backend restarts + page reloads.
+ */
+export const getOrCreateUserId = () => {
+  try {
+    const existing = localStorage.getItem('user_id')
+    if (existing && existing.trim()) return existing
+    const created = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    localStorage.setItem('user_id', created)
+    return created
+  } catch (e) {
+    // If localStorage is unavailable, fall back to an in-memory id.
+    return `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+  }
+}
+
+/**
  * Create a message payload for sending to backend
  * @param {string} sessionId - Current session ID
  * @param {string} message - User message text

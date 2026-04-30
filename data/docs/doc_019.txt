@@ -1,0 +1,4 @@
+Promotional Rate Rules
+Promotional rates are valid only during specified date ranges and cannot be applied to
+existing bookings. All promotions are subject to availability and may be withdrawn at any
+time without notice.

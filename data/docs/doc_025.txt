@@ -1,0 +1,4 @@
+Express Check-in
+Guests who complete online check-in 24 hours before arrival may proceed directly to their
+room using a mobile key. Front desk assistance remains available should any issue arise.
+Online check-in closes 2 hours before scheduled arrival.

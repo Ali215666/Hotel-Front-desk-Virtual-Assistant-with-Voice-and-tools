@@ -27,6 +27,13 @@ class OllamaClient:
         self.sync_timeout_seconds = 300
         self.stream_timeout_seconds = 300
         self.keep_alive = "30m"
+        self.options = {
+            "num_ctx": 2048,
+            "temperature": 0.2,
+        }
+        self._sync_session = requests.Session()
+        self._async_client: Optional[httpx.AsyncClient] = None
+        self._async_client_lock = asyncio.Lock()
     
     def generate(self, prompt: str) -> str:
         """
@@ -43,10 +50,11 @@ class OllamaClient:
             "prompt": prompt,
             "stream": False,
             "keep_alive": self.keep_alive,
+            "options": self.options,
         }
         
         try:
-            response = requests.post(
+            response = self._sync_session.post(
                 self.generate_url,
                 json=payload,
                 timeout=self.sync_timeout_seconds
@@ -89,37 +97,32 @@ class OllamaClient:
             "prompt": prompt,
             "stream": True,
             "keep_alive": self.keep_alive,
+            "options": self.options,
         }
         
         try:
-            timeout = httpx.Timeout(
-                timeout=self.stream_timeout_seconds,
-                connect=30.0,
-                write=30.0,
-                pool=30.0,
-            )
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream('POST', self.generate_url, json=payload) as response:
-                    if response.status_code != 200:
-                        yield f"Error: HTTP {response.status_code}"
-                        return
-                    
-                    async for line in response.aiter_lines():
-                        if line:
-                            try:
-                                chunk = json.loads(line)
-                                if 'response' in chunk:
-                                    token = chunk['response']
-                                    if token:
-                                        yield token
-                                
-                                # Check if this is the final chunk
-                                if chunk.get('done', False):
-                                    break
-                            except json.JSONDecodeError:
-                                continue
-                            except Exception:
-                                continue
+            client = await self._get_async_client()
+            async with client.stream('POST', self.generate_url, json=payload) as response:
+                if response.status_code != 200:
+                    yield f"Error: HTTP {response.status_code}"
+                    return
+
+                async for line in response.aiter_lines():
+                    if line:
+                        try:
+                            chunk = json.loads(line)
+                            if 'response' in chunk:
+                                token = chunk['response']
+                                if token:
+                                    yield token
+
+                            # Check if this is the final chunk
+                            if chunk.get('done', False):
+                                break
+                        except json.JSONDecodeError:
+                            continue
+                        except Exception:
+                            continue
         
         except httpx.TimeoutException:
             yield (
@@ -135,3 +138,51 @@ class OllamaClient:
         
         except Exception as e:
             yield f"Unexpected error: {str(e)}"
+
+    async def _get_async_client(self) -> httpx.AsyncClient:
+        """Lazily create a reusable async HTTP client for streaming calls."""
+        if self._async_client is not None:
+            return self._async_client
+
+        async with self._async_client_lock:
+            if self._async_client is not None:
+                return self._async_client
+
+            timeout = httpx.Timeout(
+                timeout=self.stream_timeout_seconds,
+                connect=30.0,
+                write=30.0,
+                pool=30.0,
+            )
+            self._async_client = httpx.AsyncClient(timeout=timeout)
+            return self._async_client
+
+    def prewarm(self, prompt: Optional[str] = None) -> bool:
+        """
+        Trigger a tiny generation to load the model into memory.
+
+        Returns:
+            bool: True when Ollama responds successfully.
+        """
+        payload = {
+            "model": self.model_name,
+            "prompt": prompt or "ping",
+            "stream": False,
+            "keep_alive": self.keep_alive,
+            "options": {
+                **self.options,
+                "num_predict": 1,
+                "temperature": 0,
+            },
+        }
+
+        try:
+            response = self._sync_session.post(
+                self.generate_url,
+                json=payload,
+                timeout=45,
+            )
+            response.raise_for_status()
+            return True
+        except requests.RequestException:
+            return False

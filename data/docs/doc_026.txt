@@ -1,0 +1,4 @@
+Express Check-out
+Express check-out allows guests to leave the key card in the designated box at the lobby
+without queuing. An itemised bill is emailed automatically. Disputes must be raised within
+48 hours of check-out.

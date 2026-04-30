@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import ChatInterface from './components/ChatInterface'
-import { generateSessionId } from './utils/messageService'
+import { generateSessionId, getOrCreateUserId } from './utils/messageService'
 import websocketService from './utils/websocketService'
 import './App.css'
 
@@ -12,10 +12,14 @@ function App() {
   const [isRecording, setIsRecording] = useState(false)
   const [isVoiceProcessing, setIsVoiceProcessing] = useState(false)
   const [sessionId, setSessionId] = useState(() => generateSessionId())
+  const [userId] = useState(() => getOrCreateUserId())
   const [connectionError, setConnectionError] = useState(null)
   const streamingMessageRef = useRef(null)
   const messageIdCounter = useRef(0)
+  const startFreshOnReconnectRef = useRef(false)
   const voiceWsRef = useRef(null)
+  const voiceReconnectTimeoutRef = useRef(null)
+  const voiceReconnectAttemptsRef = useRef(0)
   const mediaRecorderRef = useRef(null)
   const mediaStreamRef = useRef(null)
   const recordedChunksRef = useRef([])
@@ -171,17 +175,32 @@ function App() {
 
     voiceWs.onopen = () => {
       setIsVoiceConnected(true)
+      voiceReconnectAttemptsRef.current = 0
       voiceWs.send(JSON.stringify({
         type: 'init',
-        session_id: sessionId
+        session_id: sessionId,
+        user_id: userId
       }))
     }
 
-    voiceWs.onclose = () => {
+    voiceWs.onclose = (event) => {
       setIsVoiceConnected(false)
       setIsTyping(false)
       setIsVoiceProcessing(false)
       finalizeStreamingMessage()
+
+      // Auto-reconnect on backend restarts / network blips.
+      if (event?.code !== 1000) {
+        const attempt = voiceReconnectAttemptsRef.current + 1
+        voiceReconnectAttemptsRef.current = attempt
+        const delay = Math.min(15000, 1000 * attempt)
+        if (voiceReconnectTimeoutRef.current) {
+          clearTimeout(voiceReconnectTimeoutRef.current)
+        }
+        voiceReconnectTimeoutRef.current = setTimeout(() => {
+          connectVoiceWebSocket()
+        }, delay)
+      }
     }
 
     voiceWs.onerror = () => {
@@ -243,6 +262,7 @@ function App() {
   useEffect(() => {
     console.log('Initializing WebSocket connection...')
     console.log('Session ID:', sessionId)
+    console.log('User ID:', userId)
     
     // Set up WebSocket callbacks
     websocketService.onConnect(() => {
@@ -256,7 +276,8 @@ function App() {
         const sent = websocketService.send({
           session_id: sessionId,
           message: "__INIT__", // Special init message that backend can ignore
-          type: "init"
+          type: "init",
+          user_id: userId
         })
         console.log('Init handshake sent:', sent)
       }, 100)
@@ -268,7 +289,18 @@ function App() {
         timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
         id: generateMessageId()
       }
-      setMessages([welcomeMsg])
+      if (startFreshOnReconnectRef.current) {
+        // Backend restarted while frontend stayed open:
+        // start a fresh visible chat window but keep same session/user IDs.
+        setMessages([welcomeMsg])
+        setIsTyping(false)
+        setIsVoiceProcessing(false)
+        streamingMessageRef.current = null
+        stopAndClearAudioPlayback()
+        startFreshOnReconnectRef.current = false
+      } else {
+        setMessages(prev => (prev && prev.length ? prev : [welcomeMsg]))
+      }
     })
     
     websocketService.onDisconnect((event) => {
@@ -277,8 +309,10 @@ function App() {
       setIsTyping(false)
       finalizeStreamingMessage()
       
-      // Only show error if it wasn't a clean disconnect and we previously had messages
-      if (event.code !== 1000 && messages.length > 0) {
+      // If backend drops connection (e.g., restart), open a fresh visible chat
+      // after reconnect while keeping same session/user ids for CRM continuity.
+      if (event.code !== 1000) {
+        startFreshOnReconnectRef.current = true
         setConnectionError('Connection lost. Attempting to reconnect...')
       }
     })
@@ -328,7 +362,7 @@ function App() {
           timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
           id: generateMessageId()
         }
-        setMessages([welcomeMsg])
+        setMessages(prev => (prev && prev.length ? prev : [welcomeMsg]))
       }
     }, 3000) // Increased to 3 seconds to give more time
     
@@ -337,6 +371,10 @@ function App() {
       console.log('Cleaning up WebSocket connection')
       clearTimeout(connectionCheckTimeout)
       websocketService.disconnect()
+      if (voiceReconnectTimeoutRef.current) {
+        clearTimeout(voiceReconnectTimeoutRef.current)
+        voiceReconnectTimeoutRef.current = null
+      }
       if (voiceWsRef.current) {
         voiceWsRef.current.close(1000, 'Client disconnecting')
         voiceWsRef.current = null
@@ -354,7 +392,7 @@ function App() {
 
   useEffect(() => {
     if (voiceWsRef.current && voiceWsRef.current.readyState === WebSocket.OPEN) {
-      voiceWsRef.current.send(JSON.stringify({ type: 'init', session_id: sessionId }))
+      voiceWsRef.current.send(JSON.stringify({ type: 'init', session_id: sessionId, user_id: userId }))
     }
   }, [sessionId])
 
@@ -379,7 +417,8 @@ function App() {
     // Prepare JSON payload with session_id and message
     const payload = {
       session_id: sessionId,
-      message: message
+      message: message,
+      user_id: userId
     }
     
     console.log('Sending message payload:', JSON.stringify(payload, null, 2))

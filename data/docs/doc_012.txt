@@ -1,0 +1,4 @@
+Booking Modification Policy
+Modifications to existing reservations (dates, room type) are allowed up to 24 hours before
+check-in, subject to availability. Changes requested less than 24 hours before check-in
+will be treated as a new booking and may incur additional charges.

@@ -1,0 +1,38 @@
+[
+  {
+    "event_id": "50d459fa-7dc9-49b2-94bb-cfe45ae9288c",
+    "user_id": "user_123",
+    "guest_name": "Ehtisham",
+    "room_type": "Deluxe",
+    "check_in": "2026-05-10",
+    "check_out": "2026-05-15",
+    "summary": "Ehtisham - Deluxe booking",
+    "description": "Hotel stay for Ehtisham in a Deluxe room.",
+    "ics_file_path": "D:\\Hotel-Front-desk-Virtual-Assistant-with-Voice\\calendars\\user_123_50d459fa-7dc9-49b2-94bb-cfe45ae9288c.ics",
+    "created_at": "2026-04-29T21:04:56.287926Z"
+  },
+  {
+    "event_id": "8243d285-7de6-43b5-9b43-6dbe2ed3bbc4",
+    "user_id": "user_123",
+    "guest_name": "Mateen",
+    "room_type": "Deluxe",
+    "check_in": "2026-05-05",
+    "check_out": "2026-05-10",
+    "summary": "Mateen - Deluxe booking",
+    "description": "Hotel stay for Mateen in a Deluxe room.",
+    "ics_file_path": "D:\\Hotel-Front-desk-Virtual-Assistant-with-Voice\\calendars\\user_123_8243d285-7de6-43b5-9b43-6dbe2ed3bbc4.ics",
+    "created_at": "2026-04-29T21:18:00.908992Z"
+  },
+  {
+    "event_id": "6e54e2c5-1020-4be2-a598-d1dd11e61ca7",
+    "user_id": "user_123",
+    "guest_name": "Guest",
+    "room_type": "Deluxe",
+    "check_in": "2026-05-05",
+    "check_out": "2026-05-10",
+    "summary": "Guest - Deluxe booking",
+    "description": "Hotel stay for Guest in a Deluxe room.",
+    "ics_file_path": "D:\\Hotel-Front-desk-Virtual-Assistant-with-Voice\\calendars\\user_123_6e54e2c5-1020-4be2-a598-d1dd11e61ca7.ics",
+    "created_at": "2026-04-29T21:55:33.285461Z"
+  }
+]

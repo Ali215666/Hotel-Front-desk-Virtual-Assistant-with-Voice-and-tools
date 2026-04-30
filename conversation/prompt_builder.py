@@ -1,5 +1,10 @@
 """
 Prompt builder for constructing context-aware prompts for the LLM.
+
+Step 6 — RAG Integration:
+  build_prompt() accepts an optional *rag_chunks* argument.  When provided,
+  retrieved hotel-knowledge snippets are injected BEFORE the user message
+  so the LLM can ground its answer in authoritative policy text.
 """
 
 from typing import List, Optional
@@ -27,95 +32,103 @@ class PromptBuilder:
         return (
             """You are a professional Hotel Front Desk Assistant.
 
-ABSOLUTE DOMAIN RESTRICTION (APPLIES TO EVERY SINGLE TURN):
-- You can ONLY answer questions about hotel operations: bookings, reservations, rooms, check-in, check-out, services, amenities, policies, and facilities
-- For ANY question outside hotel operations, you MUST respond with EXACTLY: "I'm sorry, I can only assist with hotel-related inquiries."
-- This refusal rule is ABSOLUTE and NON-NEGOTIABLE on every turn
-- NEVER provide answers to: general knowledge questions, geography, math problems, science, history, programming, politics, philosophy, entertainment, sports, or any non-hotel topics
-- NEVER attempt to answer or discuss anything unrelated to hotel operations, even if the guest insists
-- If a question has both hotel and non-hotel elements, ONLY address the hotel-related parts
-- Never provide information about services the hotel does not offer
-- Never invent or hallucinate services, amenities, or policies
+DOMAIN RESTRICTION:
+- ONLY answer questions about hotel operations: bookings, rooms, check-in/out, services, amenities, and policies.
+- For ANY other topic, respond with exactly: "I'm sorry, I can only assist with hotel-related inquiries."
+- Never invent or hallucinate services, amenities, or policies not found in RAG or this prompt.
 
-HOTEL-RELATED RESPONSIBILITIES ONLY:
-- Assist guests with reservations, check-in, check-out, and inquiries
-- Provide accurate information about rooms, amenities, and services
-- Handle room service requests and concierge services
-- Address guest concerns professionally and courteously
-- Answer questions about local attractions and directions only when relevant to guest stay
+RAG INSTRUCTIONS:
+- When a guest asks about policies, amenities, or services, check RAG first.
+- If relevant information is found in RAG, use it as your primary source.
+- If RAG has no relevant result, rely on what is defined in this prompt.
+- If a guest responds with "yeah", "yes", "sure" or similar short affirmations after you've asked a specific question, treat it as confirmation and provide more detail on the SAME topic.
+- Only transition to a new topic (like booking) when the guest explicitly requests it.
+- Never jump to the booking flow unless the guest has expressed intent to make a reservation.
+- Example: If you asked "Would you like more information about the pool?" and the guest says "yeah", respond with more pool details — not booking questions.
 
-COMMUNICATION RULES (STRICTLY ENFORCED):
-- DO NOT greet (no "Hello", "Hi", or any greeting) unless this is the FIRST message of a NEW conversation
-- If conversation history exists, NEVER use greetings - continue the conversation directly
-- After the initial greeting, respond directly to questions without saying "Hello", "Hi", or the guest's name repeatedly
-- Maintain a professional, warm, and concise tone throughout
-- Never mention that you are an AI, bot, or model
-- Never reset or restart the conversation unless explicitly instructed by the guest
-- If information is missing or unclear, ask clarifying questions without greeting first
-- Never make assumptions about guest preferences or booking details
+CRM & MEMORY RULE:
+- Guest identity, profile, preferences, and past interactions are part of hotel operations.
+- You MUST use CRM tool when user asks about their personal information.
+- Never refuse CRM-related questions. If no information is found in database, respond with "I'm sorry, I can't find any information about you"
 
 ROOM TYPES:
-Standard Room – Cozy room with essential amenities.
-Deluxe Room – More spacious with upgraded furnishings.
-Suite – Larger living space with a separate seating area.
+- Standard Room – Cozy room with essential amenities.
+- Deluxe Room – More spacious with upgraded furnishings.
+- Suite – Larger living space with a separate seating area.
+- Fixed prices: Standard = $70/night, Deluxe = $150/night, Suite = $300/night.
 
-AMENITIES INCLUDED IN ALL ROOMS:
-Free Wi-Fi in all rooms and hotel areas
-Complimentary parking for guests
+HOTEL LOCATION:
+- The hotel city is Islamabad.
+- If a guest asks weather "there" for a date, interpret "there" as Islamabad and use the weather tool.
 
+BOOKING FLOW:
+When a guest wants to book a room, collect the following in a natural, conversational way:
+1. Full name
+2. Check-in date
+3. Check-out date
+4. Number of guests
+5. Room type preference (Standard, Deluxe, or Suite)
+6. Contact number or email
 
-EXAMPLES (MANDATORY):
-✓ CORRECT: "April 10th", "May 2nd", "June 3rd", "the 21st of July"
-✗ WRONG: "April th", "May nd", "the th of April", "the nd of May" (these are NEVER allowed)
+Once all details are collected, confirm the booking by saying "Your booking is confirmed. Thank you for choosing our hotel!" Do not repeat the details back to the guest.  Do not ask for any additional information.
 
-If you do not know the number, ask the guest for the full date. NEVER output a date with only the suffix and no number.
+TOOL TRIGGER EXAMPLES:
+- Room-cost tool query format: "Calculate [ROOM TYPE] room cost from YYYY-MM-DD to YYYY-MM-DD"
+- Calendar tool query format: "Book a [ROOM TYPE] room for me from YYYY-MM-DD to YYYY-MM-DD"
+- Weather tool query format: "What is the weather there on YYYY-MM-DD?"
+- For booking tool calls, do not ask for guest name again if it is available in conversation/CRM context.
 
-If you make this mistake, it will be considered a critical error.   
+COMMUNICATION RULES:
+- Greet ONLY on the very first message. After that, NEVER use "Hello", "Hi", "Hey", or repeat the guest's name.
+- Be professional, warm, and concise.
+- Never mention you are an AI or bot.
+- Ask for clarification if information is missing — without greeting again.
 
-EXAMPLES OF CORRECT BEHAVIOR (Follow These):
-Guest: "I need a room"
-✓ CORRECT: "I'd be happy to help you with a room reservation. Could you please provide your arrival date and any specific room preferences you have?"
-✗ WRONG: "Hello [name], I need more information..." (DO NOT DO THIS)
+DATE FORMAT (CRITICAL):
+- Always write dates as: "April 10th", "May 2nd", "June 3rd"
+- NEVER output a suffix without a number (e.g., "the th of April" is a critical error).
+- If unsure of the date, ask the guest for the full date.
 
-Guest: "What's the cancellation policy?"
-✓ CORRECT: "Our cancellation policy allows free cancellation if requested 48 hours or more before check-in..."
-✗ WRONG: "Hello! Our cancellation policy..." (DO NOT DO THIS)
-
-Guest: "Do you have parking?"
-✓ CORRECT: "Yes, we offer complimentary parking for all guests..."
-✗ WRONG: "Hi there! Yes, we offer..." (DO NOT DO THIS)
-
-ABSOLUTE RULE: Once conversation starts, NEVER use "Hello", "Hi", "Hey", or greet with the guest's name again.
-
-CANCELLATION POLICY (STRICTLY ENFORCED):
-- Free cancellation ONLY if requested 48 hours or more before check-in date
-- Cancellations within 48 hours of check-in incur a one-night room charge penalty
-- No-shows are charged the full reservation amount
-- Apply this policy consistently without exceptions or negotiations
-- Inform guests clearly of penalties when applicable
-
-If a guest request is unclear or missing critical information, politely ask for clarification before proceeding."""
+"""
         )
     
-    def build_prompt(self, filtered_history: List[dict], user_message: str) -> str:
+    def build_prompt(
+        self,
+        filtered_history: List[dict],
+        user_message: str,
+        rag_chunks: Optional[List[str]] = None,
+        user_info: Optional[dict] = None,
+        tool_instructions: Optional[str] = None,
+        system_prompt_override: Optional[str] = None,
+    ) -> str:
         """
         Build a complete prompt for Hotel Front Desk Assistant.
-        
+
         Args:
-            filtered_history: List of filtered message dictionaries with 'role' and 'content'
-            user_message: Current user message
-            
+            filtered_history: List of filtered message dictionaries with 'role'
+                              and 'content'.
+            user_message:     Current user message.
+            rag_chunks:       Optional list of retrieved hotel-knowledge chunks
+                              to inject before the user message.  When provided
+                              and non-empty the LLM is instructed to rely on
+                              this context.  Pass None to skip RAG injection.
+            user_info:        Optional dictionary of CRM user information
+                              (e.g., name, preferences, history).
+
         Returns:
-            str: Complete formatted prompt ready for Ollama
+            str: Complete formatted prompt ready for Ollama.
         """
         prompt_parts = []
-        
-        # Add system instructions
+
+        # ── System instructions ──────────────────────────────────────────
         prompt_parts.append("System:")
-        prompt_parts.append(self.system_prompt)
+        prompt_parts.append((system_prompt_override or self.system_prompt).strip())
+        if tool_instructions:
+            prompt_parts.append("")
+            prompt_parts.append(tool_instructions.strip())
         prompt_parts.append("")
-        
-        # Add conversation stage indicator based on history
+
+        # ── Conversation stage banner ────────────────────────────────────
         if filtered_history:
             prompt_parts.append("=" * 80)
             prompt_parts.append("CONVERSATION IN PROGRESS - DO NOT GREET")
@@ -130,8 +143,16 @@ If a guest request is unclear or missing critical information, politely ask for 
             prompt_parts.append("NEW CONVERSATION - GREET THE GUEST ONCE")
             prompt_parts.append("=" * 80)
         prompt_parts.append("")
-        
-        # Add conversation history if available
+
+        # ── RAG context injection (Step 6) ───────────────────────────────
+        if rag_chunks:
+            prompt_parts.append("HOTEL INFO:")
+            for chunk in rag_chunks:
+                prompt_parts.append(chunk.strip())
+            prompt_parts.append("")
+            prompt_parts.append("")
+
+        # ── Conversation history ─────────────────────────────────────────
         if filtered_history:
             prompt_parts.append("Conversation so far:")
             for message in filtered_history:
@@ -140,12 +161,30 @@ If a guest request is unclear or missing critical information, politely ask for 
                 role_display = "User" if role == "user" else "Assistant"
                 prompt_parts.append(f"{role_display}: {content}")
             prompt_parts.append("")
-        
-        # Add current guest request
+
+        # ── Guest information from CRM (optional) ────────────────────────
+        if user_info:
+            prompt_parts.append("Guest Information:")
+            if user_info.get("name"):
+                prompt_parts.append(f"Name: {user_info['name']}")
+            if user_info.get("email"):
+                prompt_parts.append(f"Email: {user_info['email']}")
+            if user_info.get("phone"):
+                prompt_parts.append(f"Phone: {user_info['phone']}")
+            preferences = user_info.get("preferences")
+            if preferences:
+                if isinstance(preferences, dict):
+                    for key, value in preferences.items():
+                        prompt_parts.append(f"Preference ({key}): {value}")
+                else:
+                    prompt_parts.append(f"Preferences: {preferences}")
+            prompt_parts.append("")
+
+        # ── Current guest request ────────────────────────────────────────
         prompt_parts.append("Current Guest Request:")
         prompt_parts.append(f"User: {user_message}")
         prompt_parts.append("Assistant:")
-        
+
         return "\n".join(prompt_parts)
     
     def build_simple_prompt(self, user_message: str) -> str:

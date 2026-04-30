@@ -1,0 +1,4 @@
+Reservation Process
+Reservations can be made online via our website, by phone, or directly at the front desk.
+All bookings require a valid credit card to guarantee the reservation. Confirmation is sent
+by email within 15 minutes of booking.

@@ -1,0 +1,4 @@
+ROOM TYPES:
+Standard Room: A well-equipped, comfortable room with all the essential amenities for a relaxing and budget-friendly stay.
+Deluxe Room: A spacious upgrade with stylish furnishings and enhanced comfort for a more enjoyable experience.
+Suite: A premium accommodation offering separate living and sleeping areas, designed for maximum space, privacy, and luxury.

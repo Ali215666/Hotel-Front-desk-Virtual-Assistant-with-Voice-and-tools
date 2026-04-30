@@ -17,8 +17,8 @@ class MemoryManager:
         self._summary_last_index: Dict[str, int] = {}
         self._session_booking_slots: Dict[str, dict] = {}
         self._lock = threading.Lock()
-        self._max_recent_messages = 14
-        self._max_context_chars = 3500
+        self._max_recent_messages = 6
+        self._max_context_chars = 1000
         self._max_summary_lines = 10
         self._max_fact_chars = 180
 

@@ -15,6 +15,8 @@ from llm.ollama_client import OllamaClient
 from conversation.memory_manager import MemoryManager
 from conversation.prompt_builder import PromptBuilder
 from conversation.session_manager import SessionManager
+from tools.crm import CRMTool
+from tools.orchestrator import ToolOrchestrator
 
 
 # Singleton instances
@@ -26,6 +28,8 @@ _session_manager = None
 _audio_converter = None
 _moonshine_asr = None
 _piper_tts = None
+_crm_tool = None
+_tool_orchestrator = None
 
 
 @lru_cache()
@@ -124,3 +128,20 @@ def get_piper_tts() -> PiperTTSService:
 def get_kokoro_tts() -> PiperTTSService:
     """Backward-compatible alias. Prefer get_piper_tts for new code."""
     return get_piper_tts()
+
+
+def get_crm_tool() -> CRMTool:
+    """Get or create CRM tool singleton."""
+    global _crm_tool
+    if _crm_tool is None:
+        _crm_tool = CRMTool()
+    return _crm_tool
+
+
+def get_tool_orchestrator() -> ToolOrchestrator:
+    """Get or create tool orchestrator singleton."""
+    global _tool_orchestrator
+    if _tool_orchestrator is None:
+        crm_tool = get_crm_tool()
+        _tool_orchestrator = ToolOrchestrator(crm_tool)
+    return _tool_orchestrator

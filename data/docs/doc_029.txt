@@ -1,0 +1,4 @@
+Accepted Payment Methods
+The hotel accepts Visa, MasterCard, American Express, and Discover credit and debit cards.
+Cash payments in local currency are accepted at the front desk. Cryptocurrency and cheques
+are not accepted.

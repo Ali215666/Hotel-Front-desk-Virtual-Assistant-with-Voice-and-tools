@@ -1,5 +1,11 @@
 """
 API routes for Hotel Front Desk conversational AI system.
+
+Step 7 — RAG integration:
+  Before each LLM call the retriever is invoked to fetch relevant hotel
+  knowledge chunks.  These are passed to prompt_builder.build_prompt()
+  as the optional *rag_chunks* argument.  The call runs in a thread-pool
+  executor so it never blocks the asyncio event loop.
 """
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException
@@ -21,7 +27,45 @@ from .dependencies import (
     get_audio_converter,
     get_moonshine_asr,
     get_piper_tts,
+    get_crm_tool,
+    get_tool_orchestrator,
 )
+
+# ── RAG retriever (Step 7) ────────────────────────────────────────
+try:
+    from rag.retriever import retrieve as _rag_retrieve
+    _RAG_ENABLED = True
+except ImportError:
+    _RAG_ENABLED = False
+    _rag_retrieve = None  # type: ignore[assignment]
+
+
+async def _retrieve_rag_context(query: str, top_k: int = 2) -> List[str]:
+    """
+    Asynchronous wrapper around retrieve().
+
+    Runs the synchronous embedding + FAISS search in a thread-pool executor
+    to avoid blocking the asyncio event loop.  Returns an empty list if RAG
+    is disabled or an error occurs.
+
+    Performance target: < 800 ms end-to-end (first call may be slower due to
+    model load; subsequent calls hit the in-process cache and are fast).
+
+    Each returned chunk is capped at 300 characters to keep the overall
+    prompt well within the 4096-token context window.
+    """
+    if not _RAG_ENABLED or not query or not query.strip():
+        return []
+    try:
+        chunks: List[str] = await asyncio.to_thread(_rag_retrieve, query, top_k)
+        # Truncate each chunk so the prompt stays within token budget.
+        MAX_CHUNK_CHARS = 300
+        chunks = [c[:MAX_CHUNK_CHARS] for c in chunks]
+        return chunks
+    except Exception as rag_err:  # noqa: BLE001
+        logger.warning("RAG retrieval failed (non-fatal): %s", rag_err)
+        return []
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -29,6 +73,132 @@ logger = logging.getLogger(__name__)
 
 OUT_OF_DOMAIN_REFUSAL = "I'm sorry, I can only assist with hotel-related inquiries."
 IN_DOMAIN_RECOVERY_PROMPT = "I'd be happy to help with your reservation."
+
+
+def _format_tool_narration(executed_tools: List[Dict[str, Any]]) -> str:
+    messages: List[str] = []
+    for item in executed_tools:
+        tool_name = str(item.get("tool_name", "tool"))
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        ok = bool(item.get("ok")) and bool(result.get("ok", True))
+        if not ok:
+            msg = str(
+                result.get("message")
+                or result.get("error")
+                or f"I could not complete {tool_name} right now."
+            )
+            messages.append(msg)
+            continue
+
+        if tool_name == "calculate_room_cost":
+            messages.append(str(result.get("message") or "Your room cost has been calculated."))
+        elif tool_name == "add_booking_to_calendar":
+            booking_msg = str(result.get("message") or "Your booking has been added to the calendar.")
+            download_path = str(result.get("download_path") or "").strip()
+            if download_path:
+                booking_msg += f" Download Calendar Event: {download_path}"
+            messages.append(booking_msg)
+        elif tool_name == "get_hotel_weather":
+            messages.append(str(result.get("message") or "Here is the weather update for your stay."))
+        else:
+            messages.append(str(result.get("message") or f"{tool_name} completed successfully."))
+
+    return " ".join(m for m in messages if m).strip()
+
+
+def _looks_like_tool_json_only(text: str) -> bool:
+    if not text:
+        return False
+    stripped = text.strip()
+    return stripped.startswith("{") and '"tool"' in stripped and stripped.endswith("}")
+
+
+def _extract_email(text: str) -> Optional[str]:
+    if not text:
+        return None
+    m = re.search(r"\b([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})\b", text, flags=re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def _extract_phone(text: str) -> Optional[str]:
+    if not text:
+        return None
+    # Simple international/PK-friendly capture (best effort)
+    m = re.search(r"\b(\+?\d[\d\s\-()]{6,}\d)\b", text)
+    if not m:
+        return None
+    phone = re.sub(r"\s+", " ", m.group(1)).strip()
+    return phone[:32]
+
+
+def _extract_name(text: str) -> Optional[str]:
+    if not text:
+        return None
+    m = re.search(
+        r"\b(?:my name is|i am|i'm)\s+([A-Za-z][A-Za-z\-']*(?:\s+[A-Za-z][A-Za-z\-']*)?)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def _is_identity_question(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return bool(
+        re.search(r"\b(who am i|what(?:'s| is) my name|do you know my name)\b", t)
+        or re.fullmatch(r"who am i\??", t)
+    )
+
+
+async def _auto_capture_crm_profile(crm_tool, user_id: str, user_message: str) -> None:
+    """
+    Best-effort CRM capture so profiles persist across backend restarts even if
+    the LLM doesn't emit a tool call.
+    """
+    try:
+        if not user_id or not user_message:
+            return
+
+        email = _extract_email(user_message)
+        phone = _extract_phone(user_message)
+        name = _extract_name(user_message)
+
+        if not any([email, phone, name]):
+            return
+
+        current = await crm_tool.get_user_info(user_id)
+        if isinstance(current, dict) and current.get("ok") and current.get("message") == "not found":
+            # Only create when we have at least a name or email/phone.
+            await crm_tool.store_user_info(
+                user_id,
+                name=name or "",
+                email=email or "",
+                phone=phone or "",
+                preferences={},
+            )
+            return
+
+        user = (current.get("user") if isinstance(current, dict) else None) or {}
+        if not isinstance(user, dict):
+            user = {}
+
+        current_name = (user.get("name") or "").strip()
+        current_email = (user.get("email") or "").strip()
+        current_phone = (user.get("phone") or "").strip()
+
+        # Keep CRM aligned with the latest user-provided profile data.
+        # Previously these fields were write-once, which caused stale values
+        # (e.g. an old name) to persist across backend restarts.
+        if name and name.strip().lower() != current_name.lower():
+            await crm_tool.update_user_info(user_id, "name", name)
+        if email and email.strip().lower() != current_email.lower():
+            await crm_tool.update_user_info(user_id, "email", email)
+        if phone and phone.strip() != current_phone:
+            await crm_tool.update_user_info(user_id, "phone", phone)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("CRM auto-capture failed (non-fatal): %s", exc)
 
 
 def is_hotel_related_request(user_message: str, history: Optional[List[dict]] = None) -> bool:
@@ -53,6 +223,9 @@ def is_hotel_related_request(user_message: str, history: Optional[List[dict]] = 
     # Allow name introductions
     if re.search(r"\b(my name is|i am|i'm)\b", text, re.IGNORECASE):
         return True
+    # Allow identity/CRM questions
+    if _is_identity_question(text):
+        return True
 
     # Explicit non-hotel topics - clear deny patterns
     deny_patterns = [
@@ -60,7 +233,7 @@ def is_hotel_related_request(user_message: str, history: Optional[List[dict]] = 
         r"\bwhat\s+is\s+\d+\s*[+\-*/x÷]\s*\d+\b",  # Natural math form: "what is 2+2"
         r"\b(write|create|generate|show me)\s+(code|program|script|function|python|java|javascript)",  # Coding requests
         r"\bcapital\s+of\b",  # Trivia prompt
-        r"\b(weather|president|prime minister|olympics|stock market)\b",  # Clearly non-hotel small talk topics
+        r"\b(president|prime minister|olympics|stock market)\b",  # Clearly non-hotel small talk topics
     ]
     
     for pattern in deny_patterns:
@@ -71,7 +244,7 @@ def is_hotel_related_request(user_message: str, history: Optional[List[dict]] = 
     hotel_terms = (
         "hotel", "room", "reservation", "book", "booking", "check in", "check-in",
         "check out", "check-out", "stay", "night", "nights", "wifi", "parking",
-        "breakfast", "amenity", "suite", "king", "queen", "deluxe",
+        "breakfast", "amenity", "suite", "king", "queen", "deluxe", "weather", "forecast",
     )
     
     if any(term in text for term in hotel_terms):
@@ -1459,8 +1632,11 @@ async def chat_endpoint(
         if not is_hotel_related_request(user_message, active_context):
             response = OUT_OF_DOMAIN_REFUSAL
         else:
-            # Build prompt with context
-            prompt = prompt_builder.build_prompt(active_context, user_message)
+            # ── RAG: retrieve relevant hotel knowledge ─────────────────
+            rag_chunks = await _retrieve_rag_context(user_message, top_k=2)
+
+            # Build prompt with context and RAG chunks
+            prompt = prompt_builder.build_prompt(active_context, user_message, rag_chunks=rag_chunks)
 
             # Generate response from LLM
             logger.info("Generating LLM response for session %s", session_id)
@@ -1553,12 +1729,16 @@ async def websocket_chat_endpoint(
     ollama_client = get_ollama_client()
     memory_manager = get_memory_manager()
     prompt_builder = get_prompt_builder()
+    crm_tool = get_crm_tool()
+    tool_orchestrator = get_tool_orchestrator()
     
     # Initially accept the connection without session_id
     await websocket.accept()
     logger.info("WebSocket connection accepted, awaiting session_id")
     
     current_session_id = None
+    current_user_id = None
+    system_prompt_override = None
     
     try:
         while True:
@@ -1577,14 +1757,19 @@ async def websocket_chat_endpoint(
                 
                 session_id = message_data.get("session_id")
                 user_message = message_data.get("message")
+                msg_type = message_data.get("type")
+                provided_user_id = message_data.get("user_id")
                 
                 # Validate required fields
-                if not session_id or not user_message:
+                if not session_id:
                     await websocket.send_json({
                         "type": "error",
-                        "message": "Missing required fields: 'session_id' and 'message'"
+                        "message": "Missing required field: 'session_id'"
                     })
                     continue
+
+                # Determine stable user id (frontend reconnect sends this first)
+                user_id = str(provided_user_id or session_id)
 
                 # Register connection with session_id if first message or session changed
                 if current_session_id != session_id:
@@ -1612,11 +1797,29 @@ async def websocket_chat_endpoint(
                     memory_manager.create_session(session_id)
                 
                 # Handle init/handshake messages - just acknowledge, don't process
-                if user_message == "__INIT__" or message_data.get("type") == "init":
+                if (user_message == "__INIT__") or (msg_type == "init"):
                     logger.info("Received init handshake for session %s", session_id)
+                    current_user_id = user_id
+                    try:
+                        system_prompt_override = await crm_tool.get_system_prompt_with_context(
+                            current_user_id,
+                            base_system_prompt=prompt_builder.system_prompt,
+                        )
+                    except Exception as crm_prompt_err:  # noqa: BLE001
+                        logger.warning("Failed building CRM system prompt (non-fatal): %s", crm_prompt_err)
+                        system_prompt_override = None
+
                     await websocket.send_json({
                         "type": "status",
                         "message": "Session registered"
+                    })
+                    continue
+
+                # For normal messages, require message content
+                if not user_message:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "Missing required field: 'message'"
                     })
                     continue
                 
@@ -1632,17 +1835,68 @@ async def websocket_chat_endpoint(
                 history = memory_manager.get_history(session_id)
                 active_context = memory_manager.get_active_context(history, session_id=session_id)
 
-                memory_manager.add_message(session_id, "user", user_message)
-
                 try:
+                    current_user_id = current_user_id or user_id
+                    await _auto_capture_crm_profile(crm_tool, current_user_id, user_message)
+
+                    memory_manager.add_message(session_id, "user", user_message)
+                    current_user_id = current_user_id or user_id
+                    await crm_tool.append_interaction(current_user_id, user_message)
+                    
                     has_history = len(active_context) > 0
                     if not is_hotel_related_request(user_message, active_context):
                         full_response = OUT_OF_DOMAIN_REFUSAL
+                        await websocket.send_json({"type": "token", "content": full_response})
                     else:
-                        prompt = prompt_builder.build_prompt(active_context, user_message)
-                        full_response = ollama_client.generate(prompt)
-                    if full_response.startswith("Error:"):
-                        raise RuntimeError(full_response)
+                        # ── RAG: retrieve relevant hotel knowledge ───────
+                        rag_chunks = await _retrieve_rag_context(user_message, top_k=2)
+
+                        # ── CRM: fetch user info ──────────────────────────
+                        crm_result = await crm_tool.get_user_info(current_user_id)
+                        user_info = crm_result.get("user") if isinstance(crm_result, dict) else None
+                        
+                        tools_enabled = tool_orchestrator.should_enable_tools(user_message)
+                        prompt = prompt_builder.build_prompt(
+                            active_context, 
+                            user_message, 
+                            rag_chunks=rag_chunks,
+                            user_info=user_info,
+                            tool_instructions=tool_orchestrator.get_tool_system_prompt() if tools_enabled else None,
+                            system_prompt_override=system_prompt_override,
+                        )
+
+                        # For normal Q&A: stream immediately for low TTFT.
+                        # For tool-intent turns: capture output first, execute tool, then narrate.
+                        full_response = ""
+                        if not tools_enabled:
+                            async for token in ollama_client.generate_stream(prompt):
+                                if not token:
+                                    continue
+                                if token.startswith("Error:"):
+                                    raise RuntimeError(token)
+                                full_response += token
+                                await websocket.send_json({"type": "token", "content": token})
+                        else:
+                            async for token in ollama_client.generate_stream(prompt):
+                                if not token:
+                                    continue
+                                if token.startswith("Error:"):
+                                    raise RuntimeError(token)
+                                full_response += token
+
+                            executed_tools = await tool_orchestrator.execute_tool_calls(full_response, user_message=user_message)
+                            if executed_tools:
+                                logger.info("Tool results detected, using deterministic narration")
+                                full_response = _format_tool_narration(executed_tools)
+                                await websocket.send_json({"type": "token", "content": full_response})
+                            elif _looks_like_tool_json_only(full_response):
+                                full_response = "I can help with hotel policies. Please ask your question again in plain text."
+                                await websocket.send_json({"type": "token", "content": full_response})
+                            else:
+                                await websocket.send_json({"type": "token", "content": full_response})
+
+                    if not full_response:
+                        raise RuntimeError("Empty response from model")
 
                     full_response = sanitize_model_response_text(full_response)
                     full_response = apply_fast_response_fixes(
@@ -1652,8 +1906,6 @@ async def websocket_chat_endpoint(
                         prompt_builder=prompt_builder,
                     )
                     cleaned_response = clean_greeting_from_response(full_response, has_history)
-
-                    await _stream_text_word_by_word(websocket, cleaned_response)
 
                     await websocket.send_json({"type": "done", "message": "Response complete"})
 
@@ -1751,6 +2003,8 @@ async def websocket_voice_chat_endpoint(
     ollama_client = get_ollama_client()
     memory_manager = get_memory_manager()
     prompt_builder = get_prompt_builder()
+    crm_tool = get_crm_tool()
+    tool_orchestrator = get_tool_orchestrator()
     audio_converter = get_audio_converter()
     moonshine_asr = get_moonshine_asr()
     piper_tts = get_piper_tts()
@@ -1758,6 +2012,8 @@ async def websocket_voice_chat_endpoint(
     await websocket.accept()
     current_session_id = None
     current_connection_key = None
+    current_user_id = None
+    system_prompt_override = None
     buffered_audio = bytearray()
     current_mime_type = "audio/webm"
 
@@ -1826,8 +2082,41 @@ async def websocket_voice_chat_endpoint(
         history = memory_manager.get_history(session_id)
         active_context = memory_manager.get_active_context(history, session_id=session_id)
 
-        prompt = prompt_builder.build_prompt(active_context, transcript)
-        memory_manager.add_message(session_id, "user", transcript)
+        # ── CRM: fetch user info ──────────────────────────
+        nonlocal current_user_id
+        current_user_id = current_user_id or session_id
+        await _auto_capture_crm_profile(crm_tool, current_user_id, transcript)
+
+        crm_result = await crm_tool.get_user_info(current_user_id)
+        user_info = crm_result.get("user") if isinstance(crm_result, dict) else None
+
+        # Apply the same domain guardrail as text chat.
+        if not is_hotel_related_request(transcript, active_context):
+            full_response = OUT_OF_DOMAIN_REFUSAL
+            memory_manager.add_message(session_id, "user", transcript)
+            memory_manager.add_message(session_id, "assistant", full_response)
+            await websocket.send_json({"type": "token", "content": full_response})
+            await websocket.send_json({"type": "done", "message": "Response complete"})
+            await websocket.send_json({"type": "audio_done", "chunks": 0})
+            return
+
+        # ── RAG: retrieve relevant hotel knowledge (match /ws/chat behavior) ───────
+        rag_chunks = await _retrieve_rag_context(transcript, top_k=2)
+
+        prompt = prompt_builder.build_prompt(
+            active_context, 
+            transcript,
+            rag_chunks=rag_chunks,
+            user_info=user_info,
+            tool_instructions=tool_orchestrator.get_tool_system_prompt(),
+            system_prompt_override=system_prompt_override,
+        )
+        
+        try:
+            memory_manager.add_message(session_id, "user", transcript)
+            await crm_tool.append_interaction(current_user_id, transcript)
+        except Exception as crm_err:
+            logger.warning(f"CRM interaction logging failed: {crm_err}")
 
         # Low-latency voice output with deterministic chunking:
         # - stream text tokens immediately to UI
@@ -1918,6 +2207,15 @@ async def websocket_voice_chat_endpoint(
             if only_fragment:
                 audio_seq = await _stream_tts_for_text(websocket, piper_tts, only_fragment, audio_seq)
 
+        # ── TOOL ORCHESTRATION ──────────────────────────
+        executed_tools = await tool_orchestrator.execute_tool_calls(full_response, user_message=transcript)
+        if executed_tools:
+            logger.info("Voice: Tool results detected, using deterministic narration")
+            full_response = _format_tool_narration(executed_tools)
+            if full_response.strip():
+                await websocket.send_json({"type": "token", "content": full_response})
+                audio_seq = await _stream_tts_for_text(websocket, piper_tts, full_response, audio_seq)
+
         full_response = repair_greeting_opener_with_llm(
             transcript,
             full_response,
@@ -1955,6 +2253,7 @@ async def websocket_voice_chat_endpoint(
 
             msg_type = message_data.get("type", "")
             session_id = message_data.get("session_id")
+            user_id = message_data.get("user_id") or session_id
 
             if not session_id:
                 await websocket.send_json({"type": "error", "message": "Missing session_id"})
@@ -1964,6 +2263,15 @@ async def websocket_voice_chat_endpoint(
             await ensure_state_for_session(session_id)
 
             if msg_type == "init":
+                current_user_id = str(user_id)
+                try:
+                    system_prompt_override = await crm_tool.get_system_prompt_with_context(
+                        current_user_id,
+                        base_system_prompt=prompt_builder.system_prompt,
+                    )
+                except Exception as crm_prompt_err:  # noqa: BLE001
+                    logger.warning("Failed building CRM system prompt (non-fatal): %s", crm_prompt_err)
+                    system_prompt_override = None
                 await websocket.send_json({"type": "status", "message": "Voice session registered"})
                 continue
 

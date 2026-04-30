@@ -9,12 +9,18 @@ Guests interact through a real-time chat interface powered by a locally running 
 ## Table of Contents
 
 1. [Architecture Diagram](#architecture-diagram)
-2. [Setup Instructions](#setup-instructions)
-3. [Model Selection](#model-selection)
-4. [Performance Benchmarks](#performance-benchmarks)
-5. [Running the Benchmark Tests](#running-the-benchmark-tests)
-6. [Known Limitations](#known-limitations)
-7. [Voice Features & Troubleshooting](#voice-features--troubleshooting)
+2. [System Overview](#system-overview)
+3. [Core Data Flow](#core-data-flow)
+4. [Key Components](#key-components)
+5. [Setup Instructions](#setup-instructions)
+6. [Model Selection](#model-selection)
+7. [Tool System](#tool-system)
+8. [RAG & Knowledge Base](#rag--knowledge-base)
+9. [CRM & Guest Personalization](#crm--guest-personalization)
+10. [Performance Benchmarks](#performance-benchmarks)
+11. [Running the Benchmark Tests](#running-the-benchmark-tests)
+12. [Known Limitations](#known-limitations)
+13. [Voice Features & Troubleshooting](#voice-features--troubleshooting)
 
 ---
 
@@ -25,31 +31,129 @@ Guests interact through a real-time chat interface powered by a locally running 
 
 
 
-### Data Flow (one turn)
+## System Overview
+
+The Hotel-Front-desk-Virtual-Assistant-with-Voice is a **fully local, domain-restricted conversational AI system** for hotel front-desk operations. It combines:
+- **Speech Recognition**: Moonshine ASR for audio-to-text (runs locally, no cloud dependencies)
+- **Language Model**: Qwen 2.5-3B via Ollama for domain-restricted responses
+- **Retrieval-Augmented Generation**: FAISS vector store + sentence-transformers for hotel knowledge lookup
+- **Tool Execution**: Automated booking, calendar, weather, CRM, and cost calculator integrations
+- **Text-to-Speech**: Piper TTS for voice responses
+- **Session Persistence**: In-memory + SQLite storage for multi-turn conversations and guest profiles
+
+All components run **100% locally** with no external API dependencies (except optional OpenWeather API for weather forecasts).
+
+---
+
+## Core Data Flow
+
+### Single Turn (Text Input)
 
 ```
-User types or speaks message
+User submits text message
   │
   ▼
-Frontend (websocketService.js)
-  sends JSON → { session_id, message } (text or transcript)
+Backend Input Validation (Pydantic + Custom Checks)
+  ├─ Check session exists (create if needed)
+  ├─ Validate message length, format
+  └─ Check domain guardrail (hotel-related?)
+      └─ If not: Return immediate refusal
   │
   ▼
-Backend routes.py
-  1. Validate inputs (Pydantic + custom checks)
-  2. memory_manager.get_history(session_id)
-  3. memory_manager.get_active_context()   ← last 6 turns (12 messages)
-  4. prompt_builder.build_prompt()         ← system prompt + history + user msg
-  5. ollama_client.generate() / generate_stream()
-  6. clean_greeting_from_response()        ← strip repeated hellos
-  7. memory_manager.add_message()          ← persist both turns
-  8. Return reply via WebSocket / REST (text)
+Retrieval-Augmented Generation (RAG)
+  ├─ Embed user query with sentence-transformers (384-dim vectors)
+  ├─ Search FAISS vector index for top-2 hotel knowledge chunks
+  ├─ Chunks cached (LRU cache, max 128 entries) to avoid re-embedding
+  └─ Retrieve chunks truncated to 300 characters max
   │
   ▼
-Frontend renders streaming tokens in MessageDisplay
+Memory Retrieval
+  ├─ Get full conversation history for session
+  ├─ Filter to last 6 turns (12 messages) to fit token budget
+  ├─ Auto-extract booking slots (dates, room type, guest name, count)
+  └─ Extract guest email/phone for CRM (if present)
   │
   ▼
-If voice enabled: TTS (Piper) streams audio chunks to frontend for playback
+Prompt Assembly (prompt_builder.py)
+  ├─ System prompt + domain guardrails
+  ├─ Inject RAG chunks as "RETRIEVED HOTEL KNOWLEDGE" section
+  ├─ Add conversation banner (NEW vs. IN PROGRESS)
+  ├─ Append filtered history + current user message
+  ├─ Inject CRM context if repeat guest (name, preferences, past interactions)
+  └─ Inject tool schemas (JSON) for model to use if needed
+  │
+  ▼
+LLM Inference (Ollama + Qwen 2.5-3B)
+  ├─ Stream tokens incrementally to frontend
+  ├─ Settings: temp=0.35, num_predict=90 (concise responses)
+  └─ Timeout: 300s (CPU-only inference)
+  │
+  ▼
+Tool Execution (Tool Orchestrator)
+  ├─ Parse streamed response for tool calls (JSON regex extraction)
+  ├─ Validate tool is appropriate for user context
+  ├─ Route to correct tool handler:
+  │  ├─ calculator.py → Room cost calculation
+  │  ├─ calendar_tool.py → Add booking to .ics file
+  │  ├─ weather.py → OpenWeather API (cached 10 min)
+  │  ├─ crm.py → Get/store/update guest profile
+  │  └─ (More tools can be added)
+  └─ Replace JSON output with human-friendly narration
+  │
+  ▼
+Memory Persistence
+  ├─ Store user message in session history (in-memory)
+  ├─ Store assistant response in session history
+  ├─ Update CRM with extracted guest info (SQLite)
+  └─ Append interaction to CRM history log
+  │
+  ▼
+WebSocket Response
+  ├─ Stream tokens to frontend with ~12ms word-by-word delay
+  └─ Return final response + session metadata
+
+```
+
+### Voice Input (ASR → LLM → TTS)
+
+```
+User clicks "Record" → speaks
+  │
+  ▼
+Browser captures audio (MediaRecorder API) → WebM/Opus format
+  │
+  ▼
+Frontend sends binary audio to /ws/voice_chat WebSocket
+  │
+  ▼
+Backend AudioConverter (audio_pipeline.py)
+  ├─ FFmpeg: Convert WebM/Opus → WAV 16kHz mono PCM
+  ├─ Non-blocking (thread pool executor)
+  └─ Throw error if ffmpeg not installed
+  │
+  ▼
+Moonshine ASR (audio_pipeline.py)
+  ├─ Load model from HuggingFace (lazy init)
+  ├─ Thread-safe (max 4 concurrent transcriptions)
+  ├─ Transcribe WAV → text transcript
+  └─ Return as user message
+  │
+  ▼
+(Standard LLM pipeline above, same as text)
+  │
+  ▼
+Piper TTS (audio_pipeline.py)
+  ├─ Load .onnx model from $PIPER_MODEL_PATH
+  ├─ Synthesize response text → audio WAV
+  ├─ Split into 24KB base64-encoded chunks
+  └─ Stream over WebSocket with sequence numbers
+  │
+  ▼
+Frontend Audio Playback
+  ├─ Buffer incoming chunks (handle out-of-order arrival)
+  ├─ Queue chunks by sequence number
+  ├─ Play continuously as chunks arrive
+  └─ Show "playing" indicator
 ```
 
 ---
@@ -184,6 +288,176 @@ PARAMETER num_thread      0   # 0 = use all available CPU threads
 
 ---
 
+## Tool System
+
+The backend includes an automated **Tool Orchestrator** that detects hotel-related intents and executes appropriate tools.
+
+### Available Tools
+
+#### 1. Room Cost Calculator
+**Triggered when:** Message contains date + room type + cost keywords  
+**Function:** `tools/calculator.py::calculate_room_cost()`
+- Inputs: room_type ("Standard", "Deluxe", "Suite"), check-in/out dates, guest count
+- Pricing: Standard=$70, Deluxe=$150, Suite=$300 per night
+- Logic: Base = price × nights; Add 15% surcharge if Suite + 3+ guests
+- Output: JSON with cost breakdown
+
+#### 2. Booking Calendar
+**Triggered when:** Message has booking keywords + dates  
+**Function:** `tools/calendar_tool.py::add_booking_to_calendar()`
+- Creates .ics iCalendar file per booking (compatible with Outlook/Google Calendar)
+- Persists booking record in `/calendars/bookings.json` (survives backend restart)
+- Stores: event_id (UUID), guest_name, check-in/out dates, room_type
+
+#### 3. Hotel Weather Forecast
+**Triggered when:** Message has weather keywords + optional dates  
+**Function:** `tools/weather.py::get_hotel_weather()`
+- Calls OpenWeather API (requires `$OPENWEATHER_API_KEY`)
+- Results cached 10 minutes to avoid redundant API calls
+- Returns guest-friendly summary (e.g., "Clear skies, great for outdoor activities")
+- Default location: Islamabad
+
+#### 4. CRM (Guest Profiles)
+**Triggered when:** Message asks about guest info or new booking  
+**Function:** `tools/crm.py` (SQLite-backed)
+- Stores: user_id, name, email, phone, preferences (JSON), interaction_history (list)
+- Methods: `get_user_info()`, `store_user_info()`, `update_user_info()`, `append_interaction()`
+- Auto-extracts: Emails, phone numbers, names from user messages (regex)
+- Persists to `/data/crm.db` across backend restarts
+- Repeat guests get personalized system prompt injection
+
+### Tool Execution Flow
+
+1. **Intent Detection**: `ToolOrchestrator.infer_relevant_tools()` scans message for keywords
+2. **Model Generation**: LLM streams response with embedded JSON tool calls
+3. **Parsing**: `ToolOrchestrator.execute_tool_calls()` extracts JSON from streamed text (regex with nested brace handling)
+4. **Execution**: Routes to correct tool handler
+5. **Narration**: Replaces raw JSON output with human-friendly summary (e.g., "Your booking has been added to calendar. Download: path/to/file.ics")
+
+Tools are **automatically discovered and executed** without explicit user prompting — the system infers intent from conversation context.
+
+---
+
+## RAG & Knowledge Base
+
+The system includes **Retrieval-Augmented Generation** to ground responses in hotel policies and procedures.
+
+### Knowledge Base
+
+**50 Auto-Generated Hotel Documents** covering:
+- **Hotel Policies** (10): Cancellation, no-show, refund, pet, smoking, conduct, visitor, noise, damage, children
+- **Booking Rules** (10): Reservation process, modifications, peak season, early booking, group rates, terms, waitlist, promotions, packages, payment
+- **Check-in/Out** (8): Early check-in, late checkout, express check-in, bell desk, baggage, key card, room assignment, payment
+- **Payment Rules** (7): Methods, currency, taxes, deposits, late fees, refunds
+- **Amenities** (5): Pool/fitness, restaurant, WiFi, business center, parking
+- **FAQs** (10): General, emergencies, local area, complaints, feedback
+
+### RAG Pipeline
+
+1. **Chunking**: Documents split into 500-character chunks with 80-character overlap (preserves context at boundaries)
+2. **Embedding**: Chunks embedded with `sentence-transformers/all-MiniLM-L6-v2` (384-dimensional vectors)
+3. **Indexing**: FAISS IndexFlatIP stores embeddings; supports fast cosine similarity search
+4. **Persistence**: Index saved to `/data/index/` (faiss.index, chunks.json, metadata.json)
+5. **Caching**: Query results cached in LRU cache (128 entries, keyed by query hash + top_k)
+
+### Retrieval
+
+**`retriever.py::retrieve(query, top_k=2)`**
+- Embeds user query (first embedding load: ~500ms; cached after)
+- Searches FAISS index for top-2 most similar chunks
+- Truncates chunks to 300 characters max
+- Returns {chunk_text, doc_id, similarity_score}
+
+**Caching Benefits:**
+- Repeated queries ("What's your cancellation policy?") return instantly from cache
+- Max 128 cached queries per session
+- Lookup: O(1)
+
+### Prompt Integration
+
+RAG chunks injected into `system_prompt` as:
+```
+RETRIEVED HOTEL KNOWLEDGE:
+---
+[Chunk 1]: {text}
+[Chunk 2]: {text}
+---
+Refer to the knowledge above first for policies and procedures.
+```
+
+---
+
+## CRM & Guest Personalization
+
+The system includes a **Customer Relationship Management** system to track guests, preferences, and booking history.
+
+### Guest Profile Storage
+
+**Database**: SQLite at `/data/crm.db`
+
+**Schema:**
+```sql
+users(
+  user_id TEXT PRIMARY KEY,
+  name TEXT,
+  email TEXT,
+  phone TEXT,
+  preferences TEXT,        -- JSON: {room_preference, dietary, accessibility, etc.}
+  interaction_history TEXT, -- JSON array: [turn1_text, turn2_text, ...]
+  created_at TEXT,         -- ISO 8601 timestamp
+  updated_at TEXT          -- ISO 8601 timestamp
+)
+```
+
+### Auto-Capture Features
+
+**Booking Slot Extraction** (`memory_manager.py`)
+- Automatically scans user messages for:
+  - Guest name (regex: proper nouns, "I'm", "My name is")
+  - Arrival/checkout dates (regex: date patterns)
+  - Guest count (numbers, "for 2 people", etc.)
+  - Room preference ("deluxe", "suite", "standard")
+  - Special requests (regex: "I need", "I would like", etc.)
+- Persists in `_session_booking_slots` dict per session
+- Available for tool execution without explicit form submission
+
+**Email/Phone/Name Extraction** (`routes.py`)
+- Regex patterns extract emails, phone numbers, names from any user utterance
+- Auto-updates CRM asynchronously (doesn't block response)
+- Enables repeat-guest personalization on next visit
+
+### CRM Methods
+
+| Method | Purpose |
+|--------|----------|
+| `get_user_info(user_id)` | Fetch guest profile |
+| `store_user_info(user_id, ...)` | Create new profile |
+| `update_user_info(user_id, field, value)` | Update single field |
+| `append_interaction(user_id, text)` | Add message to interaction history |
+| `get_system_prompt_with_context(user_id, base_prompt)` | Inject CRM data into system prompt |
+
+### Repeat Guest Personalization
+
+When returning guest is detected (by user_id):
+1. Fetch profile from CRM
+2. Extract past preferences and interaction highlights
+3. Inject into system prompt as context
+4. Model responds with awareness of guest history
+
+Example:
+```
+SYSTEM PROMPT:
+[...domain restrictions...]
+
+GUEST CONTEXT:
+This is a returning guest: John Smith
+Past preferences: Prefers Deluxe rooms, early check-in, no housekeeping on Sundays
+Past interactions: Requested breakfast recommendations, inquired about spa services
+Last visit: April 15-18 (3 days)
+```
+
+---
+
 ## Performance Benchmarks
 
 The following results were measured on a **mid-range laptop (CPU-only inference)** running the full stack locally.
@@ -314,16 +588,48 @@ expected HTTP status code, verifying the API is hardened against bad input.
 
 ## Known Limitations
 
-1. **Single-threaded LLM inference:** Ollama runs one request at a time on CPU. All concurrent requests queue behind each other, causing latency to grow linearly with the number of simultaneous users.
-2. **In-memory session storage:** Conversation history is stored in process memory and is lost when the backend restarts. There is no persistent database.
-3. **Domain restriction is prompt-only:** The hotel-only restriction is enforced through the system prompt. Prompt injection could bypass it; there is no secondary classifier or guardrail.
+1. **Single-threaded LLM inference:** Ollama runs one request at a time on CPU. All concurrent requests queue behind each other, causing latency to grow linearly with the number of simultaneous users. Typical response time: 15–30 seconds per turn on mid-range CPU.
+
+2. **In-memory conversation history:** Session conversation history is stored in process memory and is lost when the backend restarts. **However**: Guest CRM profiles and booking calendar records persist in SQLite, so returning guests' info is preserved.
+
+3. **Domain restriction is prompt-only:** The hotel-only restriction is enforced through the system prompt + regex guardrail. A sophisticated prompt injection could theoretically bypass it; there is no secondary classifier or LLM-based safety module.
+
+4. **RAG knowledge is static:** The 50 hotel documents are generated once at startup. Real-time policy updates require restarting the backend to re-index.
+
+5. **No multi-language support:** System prompt and tools assume English input/output. Non-English queries may be rejected or produce low-quality responses.
+
+6. **Moonshine ASR accuracy:** Moonshine is lightweight but less accurate than commercial ASR (Whisper, Google Cloud Speech). Accented speech or background noise may reduce transcription quality.
+
+7. **No persistent vector cache:** FAISS index is loaded into memory at startup. Very large hotel document sets (1000+ docs) could exceed memory; a persistent vector database (Pinecone, Weaviate) would scale better.
 
 ---
 
 ## Voice Features & Troubleshooting
 
 ### Voice Setup (Fully Local, No API Services)
-The backend runs Moonshine ASR and Piper TTS locally. No external cloud APIs or microservices are needed.
+
+The backend runs Moonshine ASR and Piper TTS locally. **No external cloud APIs or microservices are needed.**
+
+#### Prerequisites
+
+1. **FFmpeg** (required for audio conversion)
+   ```bash
+   # Windows: Download from https://ffmpeg.org or use chocolatey
+   choco install ffmpeg
+   
+   # macOS
+   brew install ffmpeg
+   
+   # Linux (Ubuntu/Debian)
+   sudo apt-get install ffmpeg
+   ```
+
+2. **Piper TTS Model** (.onnx file)
+   - Download from [Piper releases](https://github.com/rhasspy/piper/releases)
+   - Save to a local directory (e.g., `C:\models\en_US-lessac-medium.onnx`)
+   - Set environment variable (see below)
+
+#### Installation
 
 **Install backend dependencies (including Moonshine/Piper):**
 
@@ -332,17 +638,46 @@ cd backend
 pip install -r requirements.txt
 ```
 
-**Set Piper environment variable (Windows example):**
+**Set Piper environment variable:**
+
+*Windows (PowerShell):*
 ```powershell
-$env:PIPER_MODEL_PATH = "C:\\models\\en_US-lessac-medium.onnx"
+$env:PIPER_MODEL_PATH = "C:\models\en_US-lessac-medium.onnx"
 ```
 
-**Voice Test Flow:**
-1. Click **Record**, speak, then click **Stop**.
-2. The transcript appears as a user message.
-3. Assistant text streams token-by-token.
-4. Audio response auto-plays as chunks arrive.
-5. Use **Upload Audio** to test non-microphone input.
+*macOS/Linux (Bash):*
+```bash
+export PIPER_MODEL_PATH="/path/to/en_US-lessac-medium.onnx"
+```
+
+**Verify setup:**
+```bash
+# Test Moonshine loads
+python -c "from moonshine_speech import transcriber; print('Moonshine OK')"
+
+# Test Piper loads
+python -c "from piper import PiperTTS; print('Piper OK')"
+```
+
+#### Voice Test Flow
+
+1. Click **Record** button, speak clearly, then click **Stop**.
+2. Browser captures audio (MediaRecorder) → sends to backend as WebM
+3. Backend converts WebM → WAV 16kHz via FFmpeg
+4. Moonshine ASR transcribes WAV → text
+5. LLM generates response (same as text pipeline)
+6. Piper TTS synthesizes response → audio WAV chunks
+7. Audio streams back to browser in 24KB base64-encoded chunks
+8. Frontend buffers and plays audio with sequence-number ordering
+9. Use **Upload Audio** to test with .wav/.mp3 files (browser converts to WebM)
+
+#### Audio Details
+
+- **Input format:** Browser captures audio as WebM/Opus (automatic from MediaRecorder)
+- **Conversion:** FFmpeg converts to 16kHz mono WAV (Moonshine requirement)
+- **Processing:** Non-blocking (thread pool executor to avoid blocking async event loop)
+- **Output format:** Piper synthesizes WAV → 24KB chunks → base64-encoded JSON over WebSocket
+- **Playback:** Frontend queues chunks by sequence number, plays continuously
 
 ### Troubleshooting
 

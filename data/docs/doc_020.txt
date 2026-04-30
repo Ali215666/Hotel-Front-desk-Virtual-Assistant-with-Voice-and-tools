@@ -1,0 +1,4 @@
+Reservation Hold Policy
+Reservations without a credit card guarantee are held until 18:00 on the day of arrival.
+After that time, unclaimed rooms may be released to walk-in guests. Guaranteed reservations
+are held until midnight on the check-in date.

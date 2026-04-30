@@ -8,7 +8,13 @@ import logging
 
 from app.routes import router
 from app.websocket_manager import WebSocketManager
-from app.dependencies import get_websocket_manager
+from app.dependencies import (
+    get_websocket_manager,
+    get_ollama_client,
+    get_prompt_builder,
+    get_crm_tool,
+    get_tool_orchestrator,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -52,6 +58,64 @@ def create_app() -> FastAPI:
         logger.info("Initializing WebSocket Manager...")
         ws_manager = get_websocket_manager()
         logger.info(f"WebSocket Manager initialized: {ws_manager}")
+
+        # Pre-warm the RAG index so the first user request is fast.
+        # Runs in a thread-pool to avoid blocking uvicorn startup.
+        import asyncio
+        import sys
+        import os
+
+        # Ensure project root is on path so `rag` package is importable.
+        _proj_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        if _proj_root not in sys.path:
+            sys.path.insert(0, _proj_root)
+
+        async def _prewarm_rag():
+            try:
+                from rag.retriever import prewarm as prewarm_rag
+                warmed = await asyncio.to_thread(prewarm_rag)
+                if warmed:
+                    logger.info("RAG index and embeddings pre-warmed successfully.")
+                else:
+                    logger.warning("RAG pre-warm did not complete; first retrieval may be slower.")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("RAG pre-warm skipped (non-fatal): %s", exc)
+
+        async def _prewarm_ollama():
+            try:
+                ollama_client = get_ollama_client()
+                prompt_builder = get_prompt_builder()
+                warmup_prompt = prompt_builder.build_prompt([], "Hello")
+                warmed = await asyncio.to_thread(ollama_client.prewarm, warmup_prompt)
+                if warmed:
+                    logger.info("Ollama model pre-warmed successfully.")
+                else:
+                    logger.warning("Ollama pre-warm did not complete; first request may be slower.")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Ollama pre-warm skipped (non-fatal): %s", exc)
+
+        async def _prewarm_tools():
+            """
+            Warm internal tool paths without external API calls.
+            """
+            try:
+                crm_tool = get_crm_tool()
+                await crm_tool.init_db()
+
+                orchestrator = get_tool_orchestrator()
+                # Warm JSON extraction and calculator path (cheap/local).
+                await orchestrator.execute_tool_calls(
+                    '{"tool":"calculate_room_cost","room_type":"Standard","check_in":"2026-05-05","check_out":"2026-05-06"}',
+                    user_message="calculate standard room cost from 2026-05-05 to 2026-05-06",
+                )
+                logger.info("Tool orchestrator pre-warmed successfully.")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Tool pre-warm skipped (non-fatal): %s", exc)
+
+        asyncio.create_task(_prewarm_rag())
+        asyncio.create_task(_prewarm_ollama())
+        asyncio.create_task(_prewarm_tools())
+
         logger.info("Application startup complete")
         logger.info(f"API available at: http://0.0.0.0:8000")
         logger.info(f"WebSocket endpoint: ws://0.0.0.0:8000/ws/chat")

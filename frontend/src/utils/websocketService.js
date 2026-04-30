@@ -5,6 +5,7 @@
 class WebSocketService {
   constructor() {
     this.ws = null
+    this.lastUrl = null
     this.reconnectAttempts = 0
     this.maxReconnectAttempts = 5
     this.reconnectDelay = 2000
@@ -24,6 +25,7 @@ class WebSocketService {
   connect(url) {
     // Enable reconnection attempts
     this.shouldReconnect = true
+    this.lastUrl = url || this.lastUrl
     
     try {
       console.log('Connecting to WebSocket:', url)
@@ -122,7 +124,7 @@ class WebSocketService {
       console.log(`Attempting to reconnect in ${delay}ms (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`)
       
       this.reconnectTimeout = setTimeout(() => {
-        const url = this.ws ? this.ws.url : 'ws://localhost:8000/ws/chat'
+        const url = this.lastUrl || 'ws://localhost:8000/ws/chat'
         this.connect(url)
       }, delay)
     } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
