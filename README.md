@@ -759,3 +759,5 @@ The `FINAL_REPORT.md` will compile the following metrics:
 5. **Throughput / Concurrency Evals (Max Sustainable Concurrency)**
    - Pushes N parallel sessions against the WebSocket server.
    - **Good:** Being able to handle 10+ concurrent sessions with `< 15% error rate` and `TTFT < 15s` means your local server is robust enough for typical hotel lobby traffic. A sharp degradation in latency marks the hardware breakpoint.
+
+**Video Demo:** https://www.loom.com/share/fb3e8f64d1f84ce59773214dac1bc98a
