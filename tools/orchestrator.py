@@ -81,13 +81,274 @@ class ToolOrchestrator:
         if has_dates and any(k in text for k in ["weather", "forecast", "temperature", "rain", "there"]):
             tools.append("get_hotel_weather")
 
-        if any(k in text for k in ["my name", "my email", "my phone", "who am i"]):
+        if any(k in text for k in [
+            "my name", "my email", "my phone", "who am i",
+            "email address", "phone number", "contact number",
+            "store my", "save my", "update my", "remember my",
+            "what is my", "what's my", "do you have my",
+            "profile", "preferences", "my info", "my details",
+        ]):
             tools.extend(["get_user_info", "store_user_info", "update_user_info"])
 
         return tools
 
     def should_enable_tools(self, user_message: Optional[str]) -> bool:
         return len(self.infer_relevant_tools(user_message)) > 0
+
+    def try_direct_crm_operation(self, user_message: Optional[str], user_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Try to directly match and execute common CRM patterns without LLM.
+        Returns the executed tool result or None if no direct match.
+        
+        Patterns:
+        - "my phone number is X" -> update_user_info(field="phone", value="X")
+        - "my email is X" / "my email address is X" -> update_user_info(field="email", value="X")
+        - "my name is X" -> update_user_info(field="name", value="X")
+        - "my preferences are: ..." / "my preferences: ..." -> update_user_info(field="preferences", value="...")
+        - "what is my phone?" / "what's my phone number?" -> get_user_info()
+        - "what is my email?" / "what's my email address?" -> get_user_info()
+        - "what is my name?" / "tell me my name" / "do you remember my name?" -> get_user_info()
+        - "what are my preferences?" / "do you remember my preferences?" -> get_user_info()
+        """
+        if not user_message or not user_id:
+            return None
+        
+        text = user_message.strip()
+        text_lower = text.lower()
+        
+        # Pattern 1: "my phone number is 123456" or "my phone is 123456"
+        phone_match = re.search(r'my\s+phone(?:\s+number)?\s+is\s+(.+?)(?:\s*[.!?]|\s*$)', text_lower)
+        if phone_match:
+            phone_value = phone_match.group(1).strip()
+            if phone_value:
+                return {
+                    "tool_name": "update_user_info",
+                    "params": {"user_id": user_id, "field": "phone", "value": phone_value},
+                    "direct": True
+                }
+        
+        # Pattern 2: "my email is X" or "my email address is X"
+        email_match = re.search(r'my\s+email(?:\s+address)?\s+is\s+([^\s]+@[^\s]+)(?:\s|$)', text_lower)
+        if email_match:
+            email_value = email_match.group(1).strip()
+            if email_value and '@' in email_value:  # Basic email validation
+                return {
+                    "tool_name": "update_user_info",
+                    "params": {"user_id": user_id, "field": "email", "value": email_value},
+                    "direct": True
+                }
+        
+        # Pattern 3: "my name is X"
+        name_match = re.search(r'my\s+name\s+is\s+(.+?)(?:\s*[.!?]|\s*$)', text_lower)
+        if name_match:
+            name_value = name_match.group(1).strip()
+            if name_value:
+                return {
+                    "tool_name": "update_user_info",
+                    "params": {"user_id": user_id, "field": "name", "value": name_value},
+                    "direct": True
+                }
+        
+        # Pattern 4: "what is my phone?" or "what's my phone number?" or "do you remember my phone?"
+        if any(k in text_lower for k in ["what is my phone", "what's my phone", "do you have my phone", "do you remember my phone"]):
+            return {
+                "tool_name": "get_user_info",
+                "params": {"user_id": user_id},
+                "direct": True
+            }
+        
+        # Pattern 5: "what is my email?" or "what's my email address?" or "do you remember my email?"
+        if any(k in text_lower for k in ["what is my email", "what's my email", "do you have my email", "do you remember my email"]):
+            return {
+                "tool_name": "get_user_info",
+                "params": {"user_id": user_id},
+                "direct": True
+            }
+        
+        # Pattern 6: "my preferences are ..." or "my preferences: ..."
+        pref_match = re.search(r'my\s+preferences\s*(?:are)?\s*:?\s*(.+?)(?:\s*[.!?]|\s*$)', text_lower)
+        if pref_match:
+            pref_value = pref_match.group(1).strip()
+            if pref_value:
+                return {
+                    "tool_name": "update_user_info",
+                    "params": {"user_id": user_id, "field": "preferences", "value": pref_value},
+                    "direct": True
+                }
+        
+        # Pattern 7: "what is my name?" or "tell me my name" or "do you remember my name?"
+        if any(k in text_lower for k in ["what is my name", "tell me my name", "do you remember my name"]):
+            return {
+                "tool_name": "get_user_info",
+                "params": {"user_id": user_id},
+                "direct": True
+            }
+        
+        # Pattern 8: "what are my preferences?" or "do you remember my preferences?"
+        if any(k in text_lower for k in ["what are my preferences", "do you remember my preferences"]):
+            return {
+                "tool_name": "get_user_info",
+                "params": {"user_id": user_id},
+                "direct": True
+            }
+        
+        return None
+
+    async def execute_direct_crm_operation(self, crm_op: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+        """
+        Execute a direct CRM operation that was matched by try_direct_crm_operation.
+        Returns formatted tool execution results or None if operation fails.
+        """
+        if not crm_op or not crm_op.get("direct"):
+            return None
+        
+        tool_name = crm_op.get("tool_name")
+        params = crm_op.get("params", {})
+        
+        if tool_name not in self.tools:
+            return None
+        
+        try:
+            start = time.perf_counter()
+            raw = await self.tools[tool_name](params)
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+            
+            result = {
+                "tool_name": tool_name,
+                "ok": True,
+                "result": payload,
+                "params": params
+            }
+            
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            logger.info("Direct CRM operation %s completed in %.2fms", tool_name, elapsed_ms)
+            
+            return [result]
+        except Exception as e:
+            logger.error("Error executing direct CRM operation %s: %s", tool_name, e)
+            return None
+
+    def try_direct_calculator_operation(self, user_message: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Try to directly match calculator operation pattern."""
+        if not user_message:
+            return None
+        
+        text_lower = user_message.lower()
+        
+        # Pattern: Extract dates in YYYY-MM-DD format
+        dates = re.findall(r'\d{4}-\d{2}-\d{2}', text_lower)
+        if len(dates) < 2:
+            return None
+        
+        # Pattern: Look for room type keywords
+        room_types = ["standard", "king", "queen", "deluxe", "suite", "twin", "double", "single"]
+        room_type = None
+        for rt in room_types:
+            if rt in text_lower:
+                room_type = rt.capitalize()
+                break
+        
+        # Must have room type AND dates AND cost-related keywords
+        has_cost_intent = any(k in text_lower for k in ["cost", "price", "how much", "calculate"])
+        
+        if room_type and len(dates) >= 2 and has_cost_intent:
+            return {
+                "tool_name": "calculate_room_cost",
+                "params": {
+                    "room_type": room_type,
+                    "check_in": dates[0],
+                    "check_out": dates[1]
+                },
+                "direct": True
+            }
+        
+        return None
+
+    def try_direct_weather_operation(self, user_message: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Try to directly match weather operation pattern."""
+        if not user_message:
+            return None
+        
+        text_lower = user_message.lower()
+        
+        # Check for weather intent
+        has_weather_intent = any(k in text_lower for k in ["weather", "forecast", "temperature", "rain"])
+        if not has_weather_intent:
+            return None
+        
+        # Extract date in YYYY-MM-DD format
+        date_match = re.search(r'(\d{4}-\d{2}-\d{2})', text_lower)
+        if not date_match:
+            return None
+        
+        return {
+            "tool_name": "get_hotel_weather",
+            "params": {"date": date_match.group(1)},
+            "direct": True
+        }
+
+    def try_direct_calendar_operation(self, user_message: Optional[str], user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Try to directly match calendar booking operation pattern."""
+        if not user_message:
+            return None
+        
+        text_lower = user_message.lower()
+        
+        # Check for booking intent
+        has_booking_intent = any(k in text_lower for k in ["book", "booking", "reserve", "reservation"])
+        if not has_booking_intent:
+            return None
+        
+        # Extract dates in YYYY-MM-DD format
+        dates = re.findall(r'\d{4}-\d{2}-\d{2}', text_lower)
+        if len(dates) < 2:
+            return None
+        
+        # Look for room type keywords
+        room_types = ["standard", "king", "queen", "deluxe", "suite", "twin", "double", "single"]
+        room_type = None
+        for rt in room_types:
+            if rt in text_lower:
+                room_type = rt.capitalize()
+                break
+        
+        # Room type is optional for calendar, but dates are required
+        return {
+            "tool_name": "add_booking_to_calendar",
+            "params": {
+                "user_id": user_id or "guest_unknown",
+                "guest_name": "Guest",  # Default, will be updated from context if available
+                "check_in": dates[0],
+                "check_out": dates[1],
+                "room_type": room_type or "Standard"
+            },
+            "direct": True
+        }
+    
+    def try_direct_tool_operation(self, user_message: Optional[str], user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Try to directly match ANY direct pattern without LLM."""
+        if not user_message:
+            return None
+        
+        # Try each direct operation in order
+        if user_id:
+            crm_op = self.try_direct_crm_operation(user_message, user_id)
+            if crm_op:
+                return crm_op
+        
+        calc_op = self.try_direct_calculator_operation(user_message)
+        if calc_op:
+            return calc_op
+        
+        weather_op = self.try_direct_weather_operation(user_message)
+        if weather_op:
+            return weather_op
+        
+        calendar_op = self.try_direct_calendar_operation(user_message, user_id)
+        if calendar_op:
+            return calendar_op
+        
+        return None
 
     def _is_tool_call_appropriate(self, tool_name: str, user_message: Optional[str]) -> bool:
         """
@@ -114,14 +375,18 @@ class ToolOrchestrator:
             return has_weather_intent and has_date
 
         if tool_name in {"get_user_info", "store_user_info", "update_user_info"}:
-            return any(k in text for k in ["my name", "my email", "my phone", "who am i", "profile", "preferences"])
+            return any(k in text for k in [
+                "my name", "my email", "my phone", "who am i",
+                "email address", "phone number", "contact number",
+                "store my", "save my", "update my", "remember my",
+                "what is my", "what's my", "do you have my",
+                "profile", "preferences", "my info", "my details",
+            ])
 
         return True
 
-    """
-    Orchestrates tool discovery, parsing, and execution.
-    """
     def __init__(self, crm_tool: CRMTool):
+        """Initialize the tool orchestrator with a CRM tool instance."""
         self.crm_tool = crm_tool
         self.tools = {
             "get_user_info": self._get_user_info_handler,
@@ -231,7 +496,7 @@ class ToolOrchestrator:
             tool_name = call.get("name")
             params = call.get("parameters") or {}
             if tool_name not in self.tools:
-                executed.append({"tool_name": tool_name, "ok": False, "result": {"message": f"Tool '{tool_name}' not found"}})
+                executed.append({"tool_name": tool_name, "ok": False, "result": {"message": f"Tool '{tool_name}' not found"}, "params": params})
                 continue
             if not self._is_tool_call_appropriate(str(tool_name), user_message):
                 logger.info("Skipping unnecessary tool call: %s for message: %s", tool_name, user_message)
@@ -240,10 +505,10 @@ class ToolOrchestrator:
             try:
                 raw = await self.tools[tool_name](params)
                 payload = json.loads(raw) if isinstance(raw, str) else raw
-                executed.append({"tool_name": tool_name, "ok": True, "result": payload})
+                executed.append({"tool_name": tool_name, "ok": True, "result": payload, "params": params})
             except Exception as e:
                 logger.error("Error executing tool %s: %s", tool_name, e)
-                executed.append({"tool_name": tool_name, "ok": False, "result": {"message": str(e)}})
+                executed.append({"tool_name": tool_name, "ok": False, "result": {"message": str(e)}, "params": params})
             finally:
                 elapsed_ms = (time.perf_counter() - start) * 1000
                 logger.info("Tool %s completed in %.2fms", tool_name, elapsed_ms)

@@ -89,3 +89,25 @@ def embed_batch(texts: List[str]) -> np.ndarray:
         show_progress_bar=False,
     )
     return vectors.astype(np.float32)
+
+
+def prewarm_embedding_model() -> bool:
+    """
+    Pre-load the embedding model into memory.
+    
+    Called at application startup to warm up the model and avoid
+    first-query latency (saves ~24 seconds on first retrieval).
+    
+    Returns:
+        bool: True if successful, False if already loaded or error occurred.
+    """
+    try:
+        logger.info("Pre-warming embedding model: %s", _MODEL_NAME)
+        model = _get_model()
+        # Test with a dummy embedding to ensure full model initialization
+        _ = model.encode(["warmup"], convert_to_numpy=True)
+        logger.info("✓ Embedding model pre-warmed successfully")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to pre-warm embedding model: %s", exc)
+        return False

@@ -715,3 +715,47 @@ python -c "from piper import PiperTTS; print('Piper OK')"
 
 ---
 
+## Evaluation Suite
+
+The evaluation suite comprehensively measures the quality, accuracy, latency, and scalability of the virtual assistant using rigorous automated benchmarks.
+
+### Setup Steps
+1. Ensure the backend server is running: `python -m uvicorn main:app --host 0.0.0.0 --port 8000`
+2. Ensure Ollama is running locally with the target models (e.g., `qwen2.5:3b`).
+3. Ensure required API keys (e.g., `OPENWEATHER_API_KEY`) are exported in your environment.
+4. Install all dependencies: `pip install pytest pytest-asyncio websockets httpx faiss-cpu sentence-transformers langchain-community`
+
+### How to Run
+We provide a master evaluation runner that sequentially executes all suites and aggregates the results into a single report.
+
+```bash
+# Run all tests (Warning: Concurrency tests may be slow)
+python run_evals.py
+
+# Run all tests but skip the slow throughput concurrency tests
+python run_evals.py --skip-throughput
+```
+
+### What Each Metric Means
+The `FINAL_REPORT.md` will compile the following metrics:
+
+1. **Conversational Evals (Task Completion, Policy Adherence, Coherence)**
+   - Measured by a Judge LLM (Ollama). 
+   - **Good:** > 0.85 indicates the assistant reliably answers questions, follows guidelines, and sounds natural.
+   
+2. **RAG Evals (MRR, Precision@3, Faithfulness)**
+   - Evaluates the vector DB retrieval quality.
+   - **Good:** MRR > 0.8 means the correct hotel policy chunk is almost always returned first. Faithfulness > 0.8 means the assistant doesn't hallucinate.
+
+3. **Tool Evals (Correct Tool Rate, Correct Args Rate)**
+   - Evaluates if the LLM correctly parses the user's intent to trigger CRM/Calendar/Calculator tools.
+   - **Good:** 100% correct tool execution ensures zero false-positive tool calls (no mistaken database entries).
+
+4. **Latency Benchmarks (TTFT, End-to-End Latency)**
+   - **TTFT (Time To First Token):** The time between the user speaking/typing and the AI starting its response.
+   - **End-to-End Latency:** The time until the entire response finishes generating.
+   - **Good:** `TTFT < 6s` is excellent for a front-desk scenario where guests expect near-instant replies. Slower times indicate the LLM or GPU/CPU is overwhelmed.
+
+5. **Throughput / Concurrency Evals (Max Sustainable Concurrency)**
+   - Pushes N parallel sessions against the WebSocket server.
+   - **Good:** Being able to handle 10+ concurrent sessions with `< 15% error rate` and `TTFT < 15s` means your local server is robust enough for typical hotel lobby traffic. A sharp degradation in latency marks the hardware breakpoint.

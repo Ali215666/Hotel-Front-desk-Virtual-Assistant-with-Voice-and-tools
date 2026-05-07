@@ -73,14 +73,17 @@ async def get_hotel_weather(date: str, city: str = "Islamabad") -> Dict[str, Any
         if not city_name:
             return {"ok": False, "message": "Please provide a city name for weather lookup."}
 
+        logger.info(f"Weather request: city={city_name}, date={date}")
         target_date = datetime.strptime(date, "%Y-%m-%d").date()
         today = datetime.utcnow().date()
 
         cached = _cache_get(city_name, date)
         if cached:
+            logger.info(f"Weather cache hit for {city_name} on {date}")
             return cached
 
-        api_key = os.getenv("OPENWEATHER_API_KEY")
+        api_key = os.getenv("OPENWEATHER_API_KEY", "").strip()
+        logger.info(f"OpenWeather API key check: {'present' if api_key else 'MISSING'}")
         if not api_key:
             return {
                 "ok": False,
@@ -160,10 +163,13 @@ async def get_hotel_weather(date: str, city: str = "Islamabad") -> Dict[str, Any
             _cache_set(city_name, date, payload)
             return payload
     except TimeoutError:
+        logger.warning("Weather lookup timed out")
         return {"ok": False, "message": "Weather lookup timed out. Please try again in a moment."}
-    except ValueError:
+    except ValueError as e:
+        logger.warning("Invalid date format: %s", e)
         return {"ok": False, "message": "Date must be in YYYY-MM-DD format for weather lookup."}
-    except httpx.HTTPError:
+    except httpx.HTTPError as e:
+        logger.error("HTTP error fetching weather: %s", e)
         return {"ok": False, "message": "I could not reach the weather service right now."}
     except Exception as exc:  # noqa: BLE001
         logger.exception("get_hotel_weather failed: %s", exc)

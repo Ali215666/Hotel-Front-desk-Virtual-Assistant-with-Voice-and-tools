@@ -75,33 +75,129 @@ OUT_OF_DOMAIN_REFUSAL = "I'm sorry, I can only assist with hotel-related inquiri
 IN_DOMAIN_RECOVERY_PROMPT = "I'd be happy to help with your reservation."
 
 
-def _format_tool_narration(executed_tools: List[Dict[str, Any]]) -> str:
+def _format_tool_narration(executed_tools: List[Dict[str, Any]], user_message: Optional[str] = None) -> str:
+    """Format narration from tool execution results. For get_user_info, return only the requested field."""
+    
+    # Helper: Detect which field the user is requesting
+    def _get_requested_field(msg: Optional[str]) -> Optional[str]:
+        """Return 'email', 'phone', 'name', or None based on user message."""
+        if not msg:
+            return None
+        msg_lower = msg.lower()
+        if any(k in msg_lower for k in ["email", "email address"]):
+            return "email"
+        elif any(k in msg_lower for k in ["phone", "phone number"]):
+            return "phone"
+        elif "name" in msg_lower:
+            return "name"
+        return None
+    
     messages: List[str] = []
     for item in executed_tools:
-        tool_name = str(item.get("tool_name", "tool"))
-        result = item.get("result") if isinstance(item.get("result"), dict) else {}
-        ok = bool(item.get("ok")) and bool(result.get("ok", True))
-        if not ok:
-            msg = str(
-                result.get("message")
-                or result.get("error")
-                or f"I could not complete {tool_name} right now."
-            )
-            messages.append(msg)
-            continue
+        try:
+            tool_name = str(item.get("tool_name", "tool"))
+            result = item.get("result") if isinstance(item.get("result"), dict) else {}
+            params = item.get("params") if isinstance(item.get("params"), dict) else {}
+            ok = bool(item.get("ok")) and bool(result.get("ok", True))
+            if not ok:
+                if tool_name in {"get_user_info", "store_user_info", "update_user_info"}:
+                    error = str(result.get("error") or "")
+                    if "already exists" in error or "not found" in error:
+                        continue
+                msg = str(
+                    result.get("message")
+                    or result.get("error")
+                    or f"I could not complete {tool_name} right now."
+                )
+                messages.append(msg)
+                continue
 
-        if tool_name == "calculate_room_cost":
-            messages.append(str(result.get("message") or "Your room cost has been calculated."))
-        elif tool_name == "add_booking_to_calendar":
-            booking_msg = str(result.get("message") or "Your booking has been added to the calendar.")
-            download_path = str(result.get("download_path") or "").strip()
-            if download_path:
-                booking_msg += f" Download Calendar Event: {download_path}"
-            messages.append(booking_msg)
-        elif tool_name == "get_hotel_weather":
-            messages.append(str(result.get("message") or "Here is the weather update for your stay."))
-        else:
-            messages.append(str(result.get("message") or f"{tool_name} completed successfully."))
+            if tool_name == "calculate_room_cost":
+                messages.append(str(result.get("message") or "Your room cost has been calculated."))
+            elif tool_name == "add_booking_to_calendar":
+                booking_msg = str(result.get("message") or "Your booking has been added to the calendar.")
+                download_path = str(result.get("download_path") or "").strip()
+                if download_path:
+                    booking_msg += f" Download Calendar Event: {download_path}"
+                messages.append(booking_msg)
+            elif tool_name == "get_hotel_weather":
+                messages.append(str(result.get("message") or "Here is the weather update for your stay."))
+            elif tool_name == "update_user_info":
+                user = result.get("user") if isinstance(result.get("user"), dict) else {}
+                field = str(params.get("field") or "")
+                if field == "phone":
+                    stored = (user.get("phone") or "").strip()
+                    messages.append(f"Your phone number has been updated to {stored}.")
+                elif field == "email":
+                    stored = (user.get("email") or "").strip()
+                    messages.append(f"Your email address has been updated to {stored}.")
+                elif field == "name":
+                    stored = (user.get("name") or "").strip()
+                    messages.append(f"Your name has been updated to {stored}.")
+                elif field == "preferences":
+                    messages.append("Your preferences have been saved.")
+                else:
+                    messages.append("Your information has been updated.")
+            elif tool_name == "get_user_info":
+                user = result.get("user") if isinstance(result.get("user"), dict) else {}
+                if not user or result.get("message") == "not found":
+                    messages.append("I don't have any contact information stored for you yet.")
+                else:
+                    # Determine which field was requested
+                    requested_field = _get_requested_field(user_message)
+                    
+                    phone = (user.get("phone") or "").strip()
+                    email = (user.get("email") or "").strip()
+                    name = (user.get("name") or "").strip()
+                    
+                    # Return ONLY the requested field
+                    if requested_field == "phone":
+                        if phone:
+                            messages.append(f"I have your phone number as {phone}.")
+                        else:
+                            messages.append("I don't have a phone number for you.")
+                    elif requested_field == "email":
+                        if email:
+                            messages.append(f"I have your email address as {email}.")
+                        else:
+                            messages.append("I don't have an email address for you.")
+                    elif requested_field == "name":
+                        if name:
+                            messages.append(f"I have your name as {name}.")
+                        else:
+                            messages.append("I don't have your name.")
+                    else:
+                        # If no specific field requested, return all available (fallback)
+                        parts = []
+                        if phone:
+                            parts.append(f"your phone number is {phone}")
+                        if email:
+                            parts.append(f"your email address is {email}")
+                        if name:
+                            parts.append(f"your name is {name}")
+                        if parts:
+                            messages.append("I have " + ", and ".join(parts) + " on file.")
+                        else:
+                            messages.append("I found your profile but no contact details are stored yet.")
+            elif tool_name == "store_user_info":
+                user = result.get("user") if isinstance(result.get("user"), dict) else {}
+                phone = (user.get("phone") or "").strip()
+                email = (user.get("email") or "").strip()
+                if phone or email:
+                    parts = []
+                    if phone:
+                        parts.append(f"phone number {phone}")
+                    if email:
+                        parts.append(f"email {email}")
+                    messages.append("I've saved your " + " and ".join(parts) + ".")
+                else:
+                    messages.append("Your profile has been created.")
+            else:
+                messages.append(str(result.get("message") or f"{tool_name} completed successfully."))
+        except Exception as e:
+            import logging as logging_module
+            logging_module.exception("Error formatting tool %s: %s", item.get("tool_name"), e)
+            messages.append(f"Error processing {item.get('tool_name', 'tool')}")
 
     return " ".join(m for m in messages if m).strip()
 
@@ -1844,73 +1940,113 @@ async def websocket_chat_endpoint(
                     await crm_tool.append_interaction(current_user_id, user_message)
                     
                     has_history = len(active_context) > 0
+                    full_response = ""
+
                     if not is_hotel_related_request(user_message, active_context):
                         full_response = OUT_OF_DOMAIN_REFUSAL
                         await websocket.send_json({"type": "token", "content": full_response})
                     else:
-                        # ── RAG: retrieve relevant hotel knowledge ───────
-                        rag_chunks = await _retrieve_rag_context(user_message, top_k=2)
-
-                        # ── CRM: fetch user info ──────────────────────────
-                        crm_result = await crm_tool.get_user_info(current_user_id)
-                        user_info = crm_result.get("user") if isinstance(crm_result, dict) else None
-                        
-                        tools_enabled = tool_orchestrator.should_enable_tools(user_message)
-                        prompt = prompt_builder.build_prompt(
-                            active_context, 
-                            user_message, 
-                            rag_chunks=rag_chunks,
-                            user_info=user_info,
-                            tool_instructions=tool_orchestrator.get_tool_system_prompt() if tools_enabled else None,
-                            system_prompt_override=system_prompt_override,
-                        )
-
-                        # For normal Q&A: stream immediately for low TTFT.
-                        # For tool-intent turns: capture output first, execute tool, then narrate.
-                        full_response = ""
-                        if not tools_enabled:
-                            async for token in ollama_client.generate_stream(prompt):
-                                if not token:
-                                    continue
-                                if token.startswith("Error:"):
-                                    raise RuntimeError(token)
-                                full_response += token
-                                await websocket.send_json({"type": "token", "content": token})
-                        else:
-                            async for token in ollama_client.generate_stream(prompt):
-                                if not token:
-                                    continue
-                                if token.startswith("Error:"):
-                                    raise RuntimeError(token)
-                                full_response += token
-
-                            executed_tools = await tool_orchestrator.execute_tool_calls(full_response, user_message=user_message)
+                        # ── TRY DIRECT CRM OPERATION (bypass LLM for clear patterns) ───
+                        direct_crm_op = tool_orchestrator.try_direct_crm_operation(user_message, current_user_id)
+                        if direct_crm_op:
+                            logger.info("Direct CRM operation detected, bypassing LLM: %s", direct_crm_op.get("tool_name"))
+                            executed_tools = await tool_orchestrator.execute_direct_crm_operation(direct_crm_op)
                             if executed_tools:
-                                logger.info("Tool results detected, using deterministic narration")
-                                full_response = _format_tool_narration(executed_tools)
-                                await websocket.send_json({"type": "token", "content": full_response})
-                            elif _looks_like_tool_json_only(full_response):
-                                full_response = "I can help with hotel policies. Please ask your question again in plain text."
-                                await websocket.send_json({"type": "token", "content": full_response})
+                                full_response = _format_tool_narration(executed_tools, user_message)
                             else:
-                                await websocket.send_json({"type": "token", "content": full_response})
+                                full_response = "I was unable to process your request. Please try again."
+                            await websocket.send_json({"type": "token", "content": full_response})
+                        else:
+                            # ── CHECK FOR DIRECT TOOL OPERATIONS (bypass LLM) FIRST ──
+                            use_llm = True
+                            direct_op = tool_orchestrator.try_direct_tool_operation(user_message, current_user_id)
+                            if direct_op:
+                                logger.info("Direct tool operation %s matched, executing immediately", direct_op.get("tool_name"))
+                                executed_tools = await tool_orchestrator.execute_direct_crm_operation(direct_op)
+                                if executed_tools:
+                                    logger.info("Direct tool operation %s bypassed LLM", direct_op.get("tool_name"))
+                                    use_llm = False
+                                    full_response = _format_tool_narration(executed_tools, user_message)
+                                    await websocket.send_json({"type": "token", "content": full_response})
+                            
+                            if use_llm:
+                                # Phase 2: Parallelize RAG + CRM fetches for faster TTFT
+                                # Both I/O operations run concurrently instead of sequentially
+                                rag_chunks, crm_result = await asyncio.gather(
+                                    _retrieve_rag_context(user_message, top_k=2),
+                                    crm_tool.get_user_info(current_user_id),
+                                    return_exceptions=True
+                                )
+                                
+                                # Handle any exceptions from parallel operations
+                                if isinstance(rag_chunks, Exception):
+                                    logger.warning("RAG retrieval failed: %s", rag_chunks)
+                                    rag_chunks = []
+                                if isinstance(crm_result, Exception):
+                                    logger.warning("CRM lookup failed: %s", crm_result)
+                                    crm_result = {}
+                                
+                                user_info = crm_result.get("user") if isinstance(crm_result, dict) else None
+                                
+                                tools_enabled = tool_orchestrator.should_enable_tools(user_message)
+                                prompt = prompt_builder.build_prompt(
+                                    active_context, 
+                                    user_message, 
+                                    rag_chunks=rag_chunks,
+                                    user_info=user_info,
+                                    tool_instructions=tool_orchestrator.get_tool_system_prompt() if tools_enabled else None,
+                                    system_prompt_override=system_prompt_override,
+                                )
+
+                                # For normal Q&A: stream immediately for low TTFT.
+                                # For tool-intent turns: capture output first, execute tool, then narrate.
+                                if not tools_enabled:
+                                    async for token in ollama_client.generate_stream(prompt):
+                                        if not token:
+                                            continue
+                                        if token.startswith("Error:"):
+                                            raise RuntimeError(token)
+                                        full_response += token
+                                        await websocket.send_json({"type": "token", "content": token})
+                                else:
+                                    await websocket.send_json({"type": "status", "message": "Looking that up for you..."})
+                                    async for token in ollama_client.generate_stream(prompt):
+                                        if not token:
+                                            continue
+                                        if token.startswith("Error:"):
+                                            raise RuntimeError(token)
+                                        full_response += token
+
+                                    executed_tools = await tool_orchestrator.execute_tool_calls(full_response, user_message=user_message)
+                                    if executed_tools:
+                                        logger.info("Tool results detected, using deterministic narration")
+                                        full_response = _format_tool_narration(executed_tools, user_message)
+                                        await websocket.send_json({"type": "token", "content": full_response})
+                                    elif _looks_like_tool_json_only(full_response):
+                                        full_response = "I can help with hotel policies. Please ask your question again in plain text."
+                                        await websocket.send_json({"type": "token", "content": full_response})
+                                    else:
+                                        await websocket.send_json({"type": "token", "content": full_response})
+
+                                if not full_response:
+                                    raise RuntimeError("Empty response from model")
+
+                                full_response = sanitize_model_response_text(full_response)
+                                full_response = apply_fast_response_fixes(
+                                    user_message=user_message,
+                                    model_response=full_response,
+                                    filtered_history=active_context,
+                                    prompt_builder=prompt_builder,
+                                )
 
                     if not full_response:
                         raise RuntimeError("Empty response from model")
 
-                    full_response = sanitize_model_response_text(full_response)
-                    full_response = apply_fast_response_fixes(
-                        user_message=user_message,
-                        model_response=full_response,
-                        filtered_history=active_context,
-                        prompt_builder=prompt_builder,
-                    )
                     cleaned_response = clean_greeting_from_response(full_response, has_history)
-
                     await websocket.send_json({"type": "done", "message": "Response complete"})
-
                     memory_manager.add_message(session_id, "assistant", cleaned_response)
                     logger.info("Response completed for session %s", session_id)
+
 
                 except (RuntimeError, ValueError, TypeError, OSError) as stream_error:
                     logger.error("Error during response generation: %s", stream_error)
@@ -2211,7 +2347,7 @@ async def websocket_voice_chat_endpoint(
         executed_tools = await tool_orchestrator.execute_tool_calls(full_response, user_message=transcript)
         if executed_tools:
             logger.info("Voice: Tool results detected, using deterministic narration")
-            full_response = _format_tool_narration(executed_tools)
+            full_response = _format_tool_narration(executed_tools, transcript)
             if full_response.strip():
                 await websocket.send_json({"type": "token", "content": full_response})
                 audio_seq = await _stream_tts_for_text(websocket, piper_tts, full_response, audio_seq)

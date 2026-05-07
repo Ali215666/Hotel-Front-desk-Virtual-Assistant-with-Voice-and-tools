@@ -61,6 +61,7 @@ class SQLiteCRM:
 
     def __init__(self, db_path: str = "data/crm.db"):
         self.db_path = db_path
+        self._initialized = False
         os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
 
     async def _get_existing_columns(self, db: aiosqlite.Connection) -> List[str]:
@@ -165,11 +166,14 @@ class SQLiteCRM:
                 )
 
     async def init_db(self) -> None:
+        if self._initialized:
+            return
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 await self._migrate_legacy_schema(db)
                 await db.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
                 await db.commit()
+            self._initialized = True
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to initialize CRM database: %s", exc)
 
@@ -242,13 +246,26 @@ class SQLiteCRM:
                 if exists:
                     return {"ok": False, "error": "user already exists", "user_id": user_id}
 
-                await db.execute(
-                    """
-                    INSERT INTO users (user_id, name, email, phone, preferences, interaction_history, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (user_id, name, email, phone, prefs_json, history_json, now, now),
-                )
+                # Check if legacy 'data' column exists
+                existing_columns = await self._get_existing_columns(db)
+                if "data" in existing_columns:
+                    # Legacy schema with 'data' column
+                    await db.execute(
+                        """
+                        INSERT INTO users (user_id, name, email, phone, preferences, interaction_history, created_at, updated_at, data)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (user_id, name, email, phone, prefs_json, history_json, now, now, "{}"),
+                    )
+                else:
+                    # New schema without 'data' column
+                    await db.execute(
+                        """
+                        INSERT INTO users (user_id, name, email, phone, preferences, interaction_history, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (user_id, name, email, phone, prefs_json, history_json, now, now),
+                    )
                 await db.commit()
 
             return await self.get_user_info(user_id)

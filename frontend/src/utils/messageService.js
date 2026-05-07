@@ -11,20 +11,13 @@ export const generateSessionId = () => {
 }
 
 /**
- * Get or create a stable user id for CRM.
- * Stored in localStorage so it persists across backend restarts + page reloads.
+ * Generate a new user id for each session (no persistence).
+ * Each page load/new session gets a fresh user_id to ensure data isolation.
+ * This prevents data from previous sessions from bleeding into new sessions.
  */
 export const getOrCreateUserId = () => {
-  try {
-    const existing = localStorage.getItem('user_id')
-    if (existing && existing.trim()) return existing
-    const created = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-    localStorage.setItem('user_id', created)
-    return created
-  } catch (e) {
-    // If localStorage is unavailable, fall back to an in-memory id.
-    return `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-  }
+  // Generate a new user_id for each session - don't persist in localStorage
+  return `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
 }
 
 /**
